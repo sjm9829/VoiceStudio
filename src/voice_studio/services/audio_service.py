@@ -39,6 +39,14 @@ class AudioService:
                 f"선택 구간이 너무 짧습니다. {config.REFERENCE_MIN_SECONDS:.0f}초 이상 선택해 주세요.")
         return self._adapter().decode_segment(path, start_s, end_s, config.REFERENCE_SAMPLE_RATE)
 
+    def decode_preview_segment(self, path: str, start_s: float, end_s: float) -> np.ndarray:
+        """미리 듣기용 선택 구간 디코딩(24kHz mono float32). 최소 길이 제한은 적용하지 않는다."""
+        return self._adapter().decode_segment(path, start_s, end_s, config.REFERENCE_SAMPLE_RATE)
+
+    def encode_wav(self, pcm: np.ndarray, out_path: str) -> str:
+        """미리 듣기용 임시 WAV 인코딩(24kHz mono)."""
+        return self._adapter().encode_wav(pcm, config.REFERENCE_SAMPLE_RATE, out_path)
+
     def save_reference_flac(self, path: str, start_s: float, end_s: float, out_flac: str) -> str:
         """선택 구간을 24kHz mono lossless FLAC으로 보관한다(원본 전체 복사 없음)."""
         return self._adapter().decode_segment_to_flac(path, start_s, end_s, out_flac)

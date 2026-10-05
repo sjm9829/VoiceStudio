@@ -1,16 +1,28 @@
 """목소리 등록/편집 대화상자.
 
-- 참조 파일 선택(MP3/M4A/WAV/FLAC), 전체 파형 + 시작/끝 드래그 + 구간 들어보기
-- 자동 받아쓰기(선택 구간만, CPU), 대사 필수, 사용 권한 동의 체크 필수
-- 등록 시 별도 프로세스에서 음성 분석(worker) 수행 후 종료
+- 참조 파일 선택(MP3/M4A/WAV/FLAC), 전체 파형 + 시작/끝 드래그 + 선택 구간 들어보기(실제 재생)
+- 자동 받아쓰기: 실제 FasterWhisperTranscriber(cpu/int8)를 별도 스레드에서 실행(UI 블록 없음)
+- 등록은 UI 프로세스에서 직접 하지 않고 register worker(QProcess)로 위임한다.
+  Qwen 모델 로드/ICL 프롬프트 생성/프로필 저장은 전부 worker 프로세스에서 수행한다.
 """
 
 from __future__ import annotations
-from PySide6.QtCore import Qt, QThread, Signal
+import json
+import os
+import shutil
+import tempfile
+import uuid as uuidlib
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
-                               QLabel, QFileDialog, QCheckBox, QMessageBox, QPlainTextEdit)
+                               QLabel, QFileDialog, QCheckBox, QMessageBox, QPlainTextEdit,
+                               QProgressBar)
 from ..core import config
-from ..core.errors import ProfileError, VoiceStudioError
+from ..core.errors import VoiceStudioError
+from ..workers.job_schema import build_register_payload
+from ..workers.launcher import worker_command
+from ..workers.linebuffer import JsonlBuffer
 from .waveform_widget import WaveformWidget
 
 class _WaveformLoader(QThread):
@@ -25,8 +37,61 @@ class _WaveformLoader(QThread):
             peaks = self.audio.waveform(self.path)
             dur = self.audio.probe(self.path)["duration"]
             self.done.emit(peaks, dur)
-        except VoiceStudioError as exc:
+        except VoiceStudioError:
             self.done.emit([], 0.0)
+
+class _TranscribeThread(QThread):
+    """선택 구간 디코딩 + 받아쓰기를 UI 스레드 밖에서 실행한다."""
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, audio, transcriber, path, start_s, end_s):
+        super().__init__()
+        self.audio = audio
+        self.transcriber = transcriber
+        self.path = path
+        self.start_s = start_s
+        self.end_s = end_s
+
+    def run(self):
+        try:
+            pcm = self.audio.decode_preview_segment(self.path, self.start_s, self.end_s)
+            text = self.transcriber.transcribe(pcm, config.REFERENCE_SAMPLE_RATE)
+            self.done.emit(text)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+class _PreviewThread(QThread):
+    """선택 구간만 임시 WAV로 만들어 실제로 들어볼 수 있게 준비한다."""
+    ready = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, audio, path, start_s, end_s):
+        super().__init__()
+        self.audio = audio
+        self.path = path
+        self.start_s = start_s
+        self.end_s = end_s
+        self.wav_path: str | None = None
+
+    def run(self):
+        try:
+            pcm = self.audio.decode_preview_segment(self.path, self.start_s, self.end_s)
+            fd, wav_path = tempfile.mkstemp(prefix="vs_preview_", suffix=".wav")
+            os.close(fd)
+            self.audio.encode_wav(pcm, wav_path)
+            self.wav_path = wav_path
+            self.ready.emit(wav_path)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+    def cleanup(self):
+        if self.wav_path:
+            try:
+                os.unlink(self.wav_path)
+            except OSError:
+                pass
+            self.wav_path = None
 
 class VoiceEditorDialog(QDialog):
     def __init__(self, context, parent=None, uuid=None):
@@ -37,6 +102,13 @@ class VoiceEditorDialog(QDialog):
         self.resize(700, 560)
         self.source_path = None
         self.duration = 0.0
+        self._transcribe_thread = None
+        self._preview_thread = None
+        self._worker: QProcess | None = None
+        self._buffer = JsonlBuffer()
+        self._job_dir: Path | None = None
+        self._result_event: dict | None = None
+        self._error_message: str | None = None
         self._build_ui()
         if uuid:
             self._load_existing()
@@ -82,15 +154,21 @@ class VoiceEditorDialog(QDialog):
         meta_row.addWidget(stt_btn); meta_row.addWidget(preview_btn); meta_row.addStretch()
         layout.addLayout(meta_row)
 
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+        self.status_label = QLabel("")
+        layout.addWidget(self.status_label)
+
         self.consent = QCheckBox("이 음성을 사용할 권한이 있음을 확인합니다.")
         layout.addWidget(self.consent)
 
         buttons = QHBoxLayout()
-        save = QPushButton("목소리 등록" if self.uuid is None else "변경 저장")
-        save.clicked.connect(self.save)
+        self.save_btn = QPushButton("목소리 등록" if self.uuid is None else "변경 저장")
+        self.save_btn.clicked.connect(self.save)
         cancel = QPushButton("취소")
         cancel.clicked.connect(self.reject)
-        buttons.addStretch(); buttons.addWidget(save); buttons.addWidget(cancel)
+        buttons.addStretch(); buttons.addWidget(self.save_btn); buttons.addWidget(cancel)
         layout.addLayout(buttons)
 
     def _load_existing(self):
@@ -115,29 +193,69 @@ class VoiceEditorDialog(QDialog):
             QMessageBox.warning(self, "보이스 스튜디오", "오디오 파일을 열 수 없습니다.")
             return
         self.wave.set_peaks(peaks, duration)
-        self._on_selection(0.0, duration)
+        self._on_selection(0.0, min(duration, config.REFERENCE_MAX_SECONDS))
 
     def _on_selection(self, start, end):
         self.selection_label.setText(f"선택 구간: {start:.1f}초 ~ {end:.1f}초 ({end - start:.1f}초)")
-        if end - start > config.REFERENCE_WARN_SECONDS:
-            QMessageBox.warning(self, "긴 선택 구간",
-                "선택 구간이 깁니다. 사용 가능하지만 더 길다고 반드시 좋아지지는 않습니다.")
 
     def preview_selection(self):
+        """선택 구간만 임시 WAV로 만들어 실제로 재생하고, 재생 후 임시 파일을 정리한다."""
         if self.source_path is None:
+            QMessageBox.information(self, "보이스 스튜디오", "먼저 참조 파일을 선택해 주세요.")
             return
-        # 실제 재생은 배포 환경에서 검증(미검증 표시 유지). 여기서는 범위만 확인.
-        pass
+        if self._preview_thread is not None and self._preview_thread.isRunning():
+            return
+        self._preview_thread = _PreviewThread(self.context.audio, self.source_path,
+                                              self.wave.start_s, self.wave.end_s)
+        self._preview_thread.ready.connect(self._on_preview_ready)
+        self._preview_thread.failed.connect(
+            lambda msg: QMessageBox.warning(self, "보이스 스튜디오", f"들어보기를 실행할 수 없습니다.\n{msg}"))
+        self._preview_thread.start()
+
+    def _on_preview_ready(self, wav_path: str):
+        if hasattr(os, "startfile"):
+            os.startfile(wav_path)  # noqa: S606  (Windows 전용: 기본 연결 프로그램으로 WAV 재생)
+            QTimer.singleShot(15000, self._preview_thread.cleanup)
+            return
+        try:
+            from PySide6.QtMultimedia import QSoundEffect
+            from PySide6.QtCore import QUrl
+            self._preview_effect = QSoundEffect(self)
+            self._preview_effect.setSource(QUrl.fromLocalFile(wav_path))
+            self._preview_effect.play()
+            QTimer.singleShot(15000, self._preview_thread.cleanup)
+        except Exception:
+            self._preview_thread.cleanup()
+            QMessageBox.information(self, "보이스 스튜디오", "이 환경에서는 미리 듣기를 지원하지 않습니다.")
 
     def auto_transcribe(self):
         if self.source_path is None:
             QMessageBox.information(self, "보이스 스튜디오", "먼저 참조 파일을 선택해 주세요.")
             return
-        s, e = self.wave.start_s, self.wave.end_s
-        pcm = self.context.audio.decode_reference_segment(self.source_path, s, e)
-        text = self.context.transcriber.transcribe(pcm, config.REFERENCE_SAMPLE_RATE)
+        if self._transcribe_thread is not None and self._transcribe_thread.isRunning():
+            return
+        self.status_label.setText("받아쓰기 중… (처음이라면 모델을 내려받는 중일 수 있습니다)")
+        self._transcribe_thread = _TranscribeThread(
+            self.context.audio, self.context.transcriber,
+            self.source_path, self.wave.start_s, self.wave.end_s)
+        self._transcribe_thread.done.connect(self._on_transcribe_done)
+        self._transcribe_thread.failed.connect(self._on_transcribe_failed)
+        self._transcribe_thread.start()
+
+    def _on_transcribe_done(self, text: str):
+        self.status_label.setText("")
+        if not text:
+            QMessageBox.information(self, "보이스 스튜디오", "말이 인식되지 않았습니다. 대사를 직접 입력해 주세요.")
+            return
         self.transcript_edit.setPlainText(text)
 
+    def _on_transcribe_failed(self, message: str):
+        self.status_label.setText("")
+        QMessageBox.warning(self, "받아쓰기 실패",
+                            "받아쓰기를 실행할 수 없습니다. 인터넷 연결과 설정을 확인해 주세요.\n"
+                            + message[:200])
+
+    # ---- 등록: worker 위임 ----
     def save(self):
         try:
             if self.uuid:
@@ -145,17 +263,83 @@ class VoiceEditorDialog(QDialog):
                 self.accept()
                 return
             if not self.consent.isChecked():
-                QMessageBox.information(self, "보이스 스튜디오",
-                    "이 음성을 사용할 권한이 있음을 확인합니다. 에 체크해 주세요.")
+                QMessageBox.information(self, "보이스 스튜디오", "권한 확인에 체크해 주세요.")
                 return
             if not self.transcript_edit.toPlainText().strip():
                 QMessageBox.information(self, "보이스 스튜디오", "참조 음성의 대사를 입력해 주세요.")
                 return
-            # 등록 본체는 별도 프로세스(worker)에서 수행. 여기서는 컨텍스트 기반 등록 경로 사용.
-            self.context.profile_service.register(
-                name=self.name_edit.text(), source_path=self.source_path or "",
-                start_s=self.wave.start_s, end_s=self.wave.end_s,
-                ref_text=self.transcript_edit.toPlainText(), consent=self.consent.isChecked())
-            self.accept()
+            self._start_register_worker()
         except VoiceStudioError as exc:
             QMessageBox.warning(self, "등록 실패", exc.user_message)
+
+    def _start_register_worker(self):
+        from ..core.paths import safe_job_cache_dir
+        job = build_register_payload(
+            job_id=str(uuidlib.uuid4()), name=self.name_edit.text().strip(),
+            source_path=self.source_path or "",
+            start_s=self.wave.start_s, end_s=self.wave.end_s,
+            ref_text=self.transcript_edit.toPlainText().strip(),
+            profile_dir=str(self.context.profile_repository.root),
+            model_path=self.context.model_manager.model_path())
+        job_dir = safe_job_cache_dir(job["job_id"])
+        job_file = job_dir / "job.json"
+        job_file.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
+        self._job_dir = job_dir
+        self._buffer = JsonlBuffer()
+        self._result_event = None
+        self._error_message = None
+        program, args = worker_command(str(job_file))
+        self._worker = QProcess(self)
+        self._worker.readyReadStandardOutput.connect(self._on_worker_output)
+        self._worker.readyReadStandardError.connect(self._on_worker_stderr)
+        self._worker.finished.connect(self._on_register_finished)
+        self._worker.start(program, args)
+        self.save_btn.setEnabled(False)
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)  # 불확정 진행
+        self.status_label.setText("목소리를 등록하는 중… (처음이라면 모델을 준비하는 중일 수 있습니다)")
+
+    def _on_worker_output(self):
+        if self._worker is None:
+            return
+        for ev in self._buffer.feed(bytes(self._worker.readAllStandardOutput())):
+            kind = ev.get("kind")
+            if kind == "error":
+                self._error_message = ev.get("message", "오류가 발생했습니다.")
+                detail = ev.get("detail") or ""
+                if detail:
+                    self._error_message = f"{self._error_message}\n{detail}"
+            elif kind == "result":
+                self._result_event = ev
+
+    def _on_worker_stderr(self):
+        # stderr는 진단용. UI에는 보이지 않게 유지한다.
+        pass
+
+    def _on_register_finished(self, code, status):
+        if self._worker is not None:
+            try:
+                for ev in self._buffer.feed(bytes(self._worker.readAllStandardOutput())):
+                    if ev.get("kind") == "result":
+                        self._result_event = ev
+                    elif ev.get("kind") == "error" and self._error_message is None:
+                        self._error_message = ev.get("message", "")
+            except Exception:
+                pass
+        self.progress.setVisible(False)
+        self.save_btn.setEnabled(True)
+        self._cleanup_job()
+        self._worker = None
+        if code == 0 and self._result_event is not None:
+            self.status_label.setText("")
+            self.accept()
+        else:
+            QMessageBox.warning(self, "등록 실패", self._error_message or "등록에 실패했습니다.")
+
+    def _cleanup_job(self):
+        try:
+            if self._job_dir is not None and self._job_dir.exists():
+                shutil.rmtree(self._job_dir, ignore_errors=True)
+        except OSError:
+            pass
+        self._job_dir = None
