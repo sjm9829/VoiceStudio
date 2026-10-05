@@ -24,6 +24,10 @@ class ProfileRepository:
     def __init__(self, root: Path | None = None):
         self.root = root or profiles_dir()
 
+    def path_for(self, profile_uuid: str) -> Path:
+        """프로필 실제 저장 경로. 도메인 객체에 filesystem 경로를 넣지 않고 repository가 책임진다."""
+        return self.root / profile_uuid
+
     def _dir(self, profile_uuid: str) -> Path:
         d = profile_dir(self.root, profile_uuid)
         if not d.is_dir():
@@ -32,29 +36,46 @@ class ProfileRepository:
 
     # ---- CRUD ----
     def list_profiles(self) -> list[VoiceProfile]:
+        """프로필 목록. 손상/미완료(.tmp-) 프로필은 건너뛰되 last_skipped로 남긴다."""
         out: list[VoiceProfile] = []
+        self.last_skipped: list[str] = []
         if not self.root.is_dir():
             return out
         for d in sorted(self.root.iterdir()):
+            if not d.is_dir() or d.name.startswith(".tmp-"):
+                continue
             meta = d / "metadata.json"
-            if d.is_dir() and meta.is_file():
+            if meta.is_file():
                 try:
                     out.append(VoiceProfile.from_metadata(self._read_meta(meta)))
                 except ProfileError:
-                    continue
+                    self.last_skipped.append(d.name)
+            else:
+                self.last_skipped.append(d.name)  # metadata 없는 반쯤 저장된 프로필
         return out
 
     def get(self, profile_uuid: str) -> VoiceProfile:
         return VoiceProfile.from_metadata(self._read_meta(self._dir(profile_uuid) / "metadata.json"))
 
     def save(self, profile: VoiceProfile, prompt_tensors: dict[str, np.ndarray], reference_flac: bytes) -> Path:
+        """atomic 저장: .tmp-<uuid>에 전부 기록·검증 후 최종 경로로 rename. 실패 시 temp 삭제."""
         d = profile_dir(self.root, profile.uuid)
-        d.mkdir(parents=True, exist_ok=True)
-        self._validate_tensors(prompt_tensors)
-        save_file({k: np.ascontiguousarray(v) for k, v in prompt_tensors.items()}, d / "prompt.safetensors")
-        (d / "reference.flac").write_bytes(reference_flac)
-        (d / "metadata.json").write_text(
-            json.dumps(self._migrate(profile.to_metadata()), ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp = self.root / f".tmp-{profile.uuid}"
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        tmp.mkdir(parents=True)
+        try:
+            self._validate_tensors(prompt_tensors)
+            save_file({k: np.ascontiguousarray(v) for k, v in prompt_tensors.items()}, tmp / "prompt.safetensors")
+            (tmp / "reference.flac").write_bytes(reference_flac)
+            (tmp / "metadata.json").write_text(
+                json.dumps(self._migrate(profile.to_metadata()), ensure_ascii=False, indent=2), encoding="utf-8")
+            if d.exists():
+                shutil.rmtree(d)
+            tmp.rename(d)
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
         return d
 
     def update_metadata(self, profile: VoiceProfile) -> None:

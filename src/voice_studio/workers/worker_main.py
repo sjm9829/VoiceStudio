@@ -18,11 +18,11 @@ from voice_studio.workers.protocol import emit, error_event, result_event, statu
 
 def _make_services(profile_dir: str):
     """worker 전용 서비스(실제 어댑터만 사용)."""
-    from voice_studio.infra.ffmpeg_adapter import FfmpegAdapter
+    from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter
     from voice_studio.infra.profile_repository import ProfileRepository
     from voice_studio.services.audio_service import AudioService
     from voice_studio.services.profile_service import ProfileService
-    audio = AudioService(FfmpegAdapter())
+    audio = AudioService(RealFfmpegAdapter())
     repo = ProfileRepository(Path(profile_dir))
     return repo, audio, ProfileService(repo, audio)
 
@@ -52,7 +52,8 @@ def run_register(job) -> None:
     profile = service.register(
         name=job.name, source_path=job.source_path, start_s=job.start_s, end_s=job.end_s,
         ref_text=job.ref_text, consent=True, prompt=spec, waveform=pcm, sample_rate=24000)
-    emit(result_event(str(profile.profile_dir), profile_uuid=profile.uuid,
+    profile_path = repo.path_for(profile.uuid)
+    emit(result_event(str(profile_path), profile_uuid=profile.uuid,
                       name=profile.name, job_id=job.job_id))
     _release_gpu()
 

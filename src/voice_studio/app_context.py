@@ -47,3 +47,12 @@ def dev_context(fake_audio=None):
     ctx.model_manager = ModelManager()
     ctx.transcriber = FakeTranscriber()
     return ctx
+
+def create_context() -> AppContext:
+    """production context. fake 어댑터(FakeQwen/FakeTranscriber/FakeFfmpeg)는 절대 사용하지 않는다."""
+    return AppContext()
+
+def cleanup_stale_previews() -> int:
+    """이전 실행에서 정리 실패로 남은 미리 듣기 임시 WAV를 시작 시 삭제한다."""
+    from .core.paths import cleanup_preview_cache
+    return cleanup_preview_cache()

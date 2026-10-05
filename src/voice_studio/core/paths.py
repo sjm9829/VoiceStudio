@@ -37,10 +37,34 @@ def default_mp3_dir() -> Path:
     return music / "보이스 스튜디오"
 
 def ensure_app_dirs() -> dict[str, Path]:
-    paths = {"app": app_data_dir(), "profiles": profiles_dir(), "jobs": jobs_cache_dir(), "logs": logs_dir()}
+    paths = {"app": app_data_dir(), "profiles": profiles_dir(), "jobs": jobs_cache_dir(),
+             "logs": logs_dir(), "preview": preview_cache_dir()}
     for p in paths.values():
         p.mkdir(parents=True, exist_ok=True)
     return paths
+
+def preview_cache_dir() -> Path:
+    """미리 듣기 임시 WAV 관리 경로(%LOCALAPPDATA%\VoiceStudio\cache\preview). temp에 무작위 파일을 남기지 않는다."""
+    return app_data_dir() / "cache" / "preview"
+
+def cleanup_preview_cache(max_age_hours: float = 24.0) -> int:
+    """관리 경로의 오래된 미리 듣기 임시 파일 삭제. 개별 파일 삭제 실패는 무시한다."""
+    import time
+    d = preview_cache_dir()
+    if not d.is_dir():
+        return 0
+    now = time.time()
+    removed = 0
+    for f in d.iterdir():
+        if not f.is_file():
+            continue
+        try:
+            if now - f.stat().st_mtime > max_age_hours * 3600:
+                f.unlink()
+                removed += 1
+        except OSError:
+            continue  # 재생 프로그램이 잡고 있으면 다음 시작에 다시 시도
+    return removed
 
 def safe_job_cache_dir(job_id: str) -> Path:
     """작업별 임시 폴더. job_id는 uuid이므로 경로 탈출 위험이 없다."""

@@ -34,9 +34,9 @@ class AudioService:
 
     def decode_reference_segment(self, path: str, start_s: float, end_s: float) -> np.ndarray:
         """선택 구간을 24kHz mono float32로 디코딩해 worker에 제공한다."""
-        if end_s - start_s < config.REFERENCE_MIN_SECONDS:
+        if end_s - start_s < config.REFERENCE_APP_MIN_SECONDS:
             raise UnsupportedAudioError(
-                f"선택 구간이 너무 짧습니다. {config.REFERENCE_MIN_SECONDS:.0f}초 이상 선택해 주세요.")
+                f"선택 구간이 너무 짧습니다. {config.REFERENCE_APP_MIN_SECONDS:.0f}초 이상 선택해 주세요.")
         return self._adapter().decode_segment(path, start_s, end_s, config.REFERENCE_SAMPLE_RATE)
 
     def decode_preview_segment(self, path: str, start_s: float, end_s: float) -> np.ndarray:
