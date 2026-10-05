@@ -4,6 +4,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton,
                                QLineEdit, QFileDialog, QGroupBox, QMessageBox, QProgressBar)
+import json
 from pathlib import Path
 
 from ..core import config
@@ -96,13 +97,29 @@ class SettingsDialog(QDialog):
             self.dir_edit.setText(d)
 
     def check_gpu(self):
+        """설치 후 Self-Diagnosis 요약(P12.2-22).
+
+        무거운 모델 런타임 의존성을 메인 프로세스에서 import하지
+        않도록(구조 계약) 자식 인터프리터로 진단을 실행하고 요약만 받아 표시한다.
+        세부 기술 정보는 logs/diagnosis.log에만 남긴다.
+        """
+        import subprocess
+        import sys as _sys
         try:
-            import subprocess
-            r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total",
-                                "--format=csv,noheader"], capture_output=True, text=True, timeout=10)
-            self.gpu_label.setText(r.stdout.strip() or "NVIDIA 그래픽 카드를 찾을 수 없습니다.")
-        except FileNotFoundError:
-            self.gpu_label.setText("NVIDIA 그래픽 카드를 사용할 수 없습니다. (nvidia-smi 없음)")
+            r = subprocess.run([_sys.executable, "-m", "voice_studio.diagnostics", "--json", "--log"],
+                               capture_output=True, text=True, timeout=90,
+                               cwd=str(Path(__file__).resolve().parents[2]))
+            out = (r.stdout or "").strip().splitlines()
+            data = json.loads(out[-1]) if out else {}
+            summary = data.get("summary") or {}
+        except Exception:
+            summary = {"그래픽 카드": "진단을 실행할 수 없습니다.", "음성 모델": "확인 필요",
+                       "오디오 구성 요소": "확인 필요", "자동 받아쓰기": "직접 대사 입력으로 사용 가능"}
+        order = ("그래픽 카드", "CUDA", "음성 모델", "오디오 구성 요소", "자동 받아쓰기")
+        lines = [f"{k}: {summary[k]}" for k in order if k in summary]
+        lines += [f"{k}: {v}" for k, v in summary.items() if k not in order]
+        self.gpu_label.setText("\n".join(lines))
+
 
     def _select_saved_quality(self):
         saved = self.context.settings.get("mp3_bitrate_kbps", 192)

@@ -60,6 +60,17 @@ class RealFfmpegAdapter:
         if not self.ffmpeg or not self.ffprobe:
             raise FfmpegNotFoundError(f"ffmpeg={self.ffmpeg} ffprobe={self.ffprobe}")
 
+    def available(self) -> bool:
+        """ffmpeg/ffprobe를 찾았는지 여부(진단용, raise 대신 bool, P12.2-22)."""
+        return bool(self.ffmpeg) and bool(self.ffprobe)
+
+    def probe_version(self) -> str:
+        """ffmpeg 버전 문자열(진단용). 실패 시 FfmpegNotFoundError."""
+        r = self._run([self.ffmpeg, "-version"])
+        if r.returncode != 0:
+            raise FfmpegNotFoundError("ffmpeg -version 실패")
+        return (r.stdout.splitlines() or [""])[0]
+
     def _run(self, args: list[str]) -> subprocess.CompletedProcess:
         return subprocess.run(args, capture_output=True, text=True, timeout=300)
 
