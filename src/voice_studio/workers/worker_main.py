@@ -11,7 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 
+import traceback
 from voice_studio.core.errors import VoiceStudioError
+from voice_studio.core.paths import worker_logs_dir
 from voice_studio.workers.job_schema import JobSchemaError, parse_job
 from voice_studio.workers.protocol import emit, error_event, result_event, status_event, progress_event
 
@@ -25,6 +27,41 @@ def _make_services(profile_dir: str):
     audio = AudioService(RealFfmpegAdapter())
     repo = ProfileRepository(Path(profile_dir))
     return repo, audio, ProfileService(repo, audio)
+
+
+def _write_failure_log(job, exc: Exception) -> None:
+    """worker 실패 상세를 %LOCALAPPDATA%\\VoiceStudio\\logs에 기록한다(P12.2-23).
+
+    traceback은 UI에 노출하지 않고 파일로만 남긴다.
+    """
+    try:
+        d = worker_logs_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        name = "worker-failure.log"
+        with open(d / name, "a", encoding="utf-8") as fh:
+            fh.write(f"job_id={getattr(job, 'job_id', '?')} mode={getattr(job, 'mode', '?')}\n")
+            fh.write(traceback.format_exc())
+            fh.write("\n" + "-" * 60 + "\n")
+    except Exception:
+        pass
+
+
+def _require_model_path(job) -> str:
+    """production worker는 로컬 스냅샷 경로를 필수로 요구한다(P12.2-26).
+
+    비어 있으면 HF 자동 다운로드(수 GB 예상치 못한 트래픽/오랜 대기) 대신
+    E_MODEL_NOT_DOWNLOADED 오류로 명확히 실패한다.
+    """
+    path = (getattr(job, "model_path", "") or "").strip()
+    if not path:
+        raise VoiceStudioError(
+            "E_MODEL_NOT_DOWNLOADED",
+            "음성 모델이 아직 받아지지 않았습니다. 설정에서 모델을 받아 주세요.")
+    if not Path(path).exists():
+        raise VoiceStudioError(
+            "E_MODEL_NOT_DOWNLOADED",
+            "음성 모델 폴더를 찾을 수 없습니다. 설정에서 모델을 다시 받아 주세요.")
+    return path
 
 
 def _release_gpu() -> None:
@@ -42,9 +79,10 @@ def _release_gpu() -> None:
 
 def run_register(job) -> None:
     emit(status_event("model_loading", job_id=job.job_id))
+    model_path = _require_model_path(job)
     repo, audio, service = _make_services(job.profile_dir)
     from voice_studio.infra.qwen_adapter import RealQwenAdapter, default_device
-    qwen = RealQwenAdapter(model_path=job.model_path or None, device=default_device())
+    qwen = RealQwenAdapter(model_path=model_path, device=default_device())
     emit(status_event("analyzing_reference", job_id=job.job_id))
     pcm = audio.decode_reference_segment(job.source_path, job.start_s, job.end_s)
     spec = qwen.create_prompt(pcm, 24000, job.ref_text.strip())
@@ -54,8 +92,7 @@ def run_register(job) -> None:
         ref_text=job.ref_text, consent=True, prompt=spec, waveform=pcm, sample_rate=24000)
     profile_path = repo.path_for(profile.uuid)
     emit(result_event(str(profile_path), profile_uuid=profile.uuid,
-                      name=profile.name, job_id=job.job_id))
-    _release_gpu()
+                      name=profile.name, job_id=job.job_id, result_type="profile"))
 
 
 def run_narrate(job) -> None:
@@ -76,8 +113,7 @@ def run_narrate(job) -> None:
     out = narration.generate(
         gen_job, prompt, output_path=job.output_path, bitrate_kbps=job.bitrate_kbps,
         on_progress=lambda kind, i, total: emit(progress_event(i, total, kind=kind, job_id=job.job_id)))
-    emit(result_event(out, job_id=job.job_id))
-    _release_gpu()
+    emit(result_event(out, job_id=job.job_id, result_type="audio"))
 
 
 def main(argv: list[str]) -> int:
@@ -95,15 +131,21 @@ def main(argv: list[str]) -> int:
         emit(error_event("E_JOB_INVALID", "작업 파일을 읽을 수 없습니다.", detail=str(e)))
         return 2
     try:
-        if job.mode == "register":
-            run_register(job)
-        else:
-            run_narrate(job)
-        return 0
+        try:
+            if job.mode == "register":
+                run_register(job)
+            else:
+                run_narrate(job)
+            return 0
+        finally:
+            # 성공/실패 무관하게 GPU 메모리를 정리한다(P12.2-18).
+            _release_gpu()
     except VoiceStudioError as e:
+        _write_failure_log(job, e)
         emit(error_event(e.code, str(e)))
         return 3
     except Exception as e:
+        _write_failure_log(job, e)
         emit(error_event("E_WORKER_CRASH", "작업 처리 중 오류가 발생했습니다.",
                          detail=f"{type(e).__name__}: {e}"))
         return 3

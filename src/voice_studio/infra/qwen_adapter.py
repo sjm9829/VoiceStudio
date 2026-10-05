@@ -85,6 +85,28 @@ def default_device() -> str:
         return "cpu"
     return "cuda:0" if torch.cuda.is_available() else "cpu"
 
+
+def _looks_like_attention_failure(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(k in text for k in (
+        "flash_attention", "flash-attn", "attn_implementation",
+        "flashattention", "does not support", "no module named 'flash_attn'",
+        "importerror", "cuda error", "not supported"))
+
+
+def preferred_dtype(device: str):
+    """목표 GPU 정정 기준 dtype 선택(P12.2-09/10).
+
+    - RTX 2070 SUPER(Turing, CC 7.5)는 bf16 지원이 없으므로 기본은 torch.float16.
+    - Ampere 이상(bf16 지원 GPU)에서만 torch.bfloat16을 사용한다.
+    - CPU는 dtype을 강제하지 않는다(from_pretrained 기본값 유지).
+    """
+    if not device.startswith("cuda"):
+        return None
+    import torch
+    return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+
 class RealQwenAdapter:
     """공식 Qwen3-TTS 모델을 사용하는 어댑터. worker 프로세스에서만 생성한다.
 
@@ -102,15 +124,23 @@ class RealQwenAdapter:
         if device:
             kwargs["device_map"] = device
             if device.startswith("cuda"):
-                # VRAM 절약: NVIDIA GPU 로드 시 bfloat16 명시(P12.1-08).
-                kwargs["dtype"] = "bfloat16"
-            if flash_attention:
-                try:
-                    import flash_attn  # noqa: F401
-                    kwargs["attn_implementation"] = "flash_attention_2"
-                except ImportError:
-                    pass  # 표준 attention으로 fallback
-        self._model = Qwen3TTSModel.from_pretrained(source, **kwargs)
+                # VRAM 절약 + GPU 호환 dtype 객체 전달(P12.2-09/10).
+                # RTX 2070 SUPER 기준 float16, bf16 지원 GPU에서만 bfloat16.
+                dtype = preferred_dtype(device)
+                if dtype is not None:
+                    kwargs["dtype"] = dtype
+        if flash_attention:
+            kwargs["attn_implementation"] = "flash_attention_2"
+        try:
+            self._model = Qwen3TTSModel.from_pretrained(source, **kwargs)
+        except Exception as exc:
+            # flash_attention=True인 경우에만 attention 구현 문제로 1회 fallback한다(P12.2-11).
+            # 목표 PC(RTX 2070 SUPER)는 flash_attention=False 기본이며 flash_attn 미설치.
+            if flash_attention and _looks_like_attention_failure(exc):
+                kwargs.pop("attn_implementation", None)
+                self._model = Qwen3TTSModel.from_pretrained(source, **kwargs)
+            else:
+                raise
 
     def create_prompt(self, waveform: np.ndarray, sample_rate: int, ref_text: str) -> VoiceClonePromptSpec:
         # 공식 반환은 List[VoiceClonePromptItem]. 단일 참조 오디오 → 첫 항목 사용.
@@ -137,7 +167,8 @@ class RealQwenAdapter:
             ref_text=prompt.ref_text or None,
         )
         wavs, out_sr = self._model.generate_voice_clone(text, voice_clone_prompt=[item])
-        wav = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
+        # GPU tensor를 즉시 CPU numpy로 이동(VRAM 고정 해제, GPU 정정 지시 반영)
+        wav = np.asarray(_to_numpy(wavs[0]), dtype=np.float32).reshape(-1)
         if int(out_sr) != int(sample_rate):
             # 인터페이스 계약 유지: 요청 샘플레이트로 선형 리샘플(호출자는 24kHz를 기대).
             duration = wav.size / float(out_sr)

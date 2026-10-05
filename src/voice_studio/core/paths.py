@@ -24,6 +24,10 @@ def jobs_cache_dir() -> Path:
 def logs_dir() -> Path:
     return app_data_dir() / "logs"
 
+def worker_logs_dir() -> Path:
+    """worker 실패 진단 로그 위치(P12.2-23). UI traceback 노출 대신 파일로 남긴다."""
+    return logs_dir()
+
 def settings_file() -> Path:
     return app_data_dir() / "settings.json"
 
@@ -44,7 +48,7 @@ def ensure_app_dirs() -> dict[str, Path]:
     return paths
 
 def preview_cache_dir() -> Path:
-    """미리 듣기 임시 WAV 관리 경로(%LOCALAPPDATA%\VoiceStudio\cache\preview). temp에 무작위 파일을 남기지 않는다."""
+    r"""미리 듣기 임시 WAV 관리 경로(%LOCALAPPDATA%\VoiceStudio\cache\preview). temp에 무작위 파일을 남기지 않는다."""
     return app_data_dir() / "cache" / "preview"
 
 def cleanup_preview_cache(max_age_hours: float = 24.0) -> int:
