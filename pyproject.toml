@@ -8,13 +8,19 @@ version = "0.1.0"
 description = "보이스 스튜디오 - 등록한 목소리로 나레이션을 만드는 로컬 음성 생성 프로그램"
 requires-python = ">=3.12"
 license = { text = "MIT" }
-dependencies = []
+dependencies = [
+    "PySide6>=6.6,<7",
+    "numpy>=1.26,<3",
+    "safetensors>=0.4",
+    "huggingface_hub>=0.23",
+    "faster-whisper>=1.0",
+]
 
 [project.optional-dependencies]
-ui = ["PySide6>=6.6"]
-audio = ["numpy>=1.26", "safetensors>=0.4"]
-transcribe = ["faster-whisper>=1.0"]
-dev = ["pytest>=8", "pytest-qt>=4.4", "numpy>=1.26", "safetensors>=0.4"]
+# GPU/TTS 런타임(qwen-tts + torch)은 CUDA wheel 특성상 PyPI 의존성만으로 CUDA build가
+# 고정되지 않으므로, Windows 설치/빌드 스크립트에서 공식 권장 방식으로 별도 설치한다.
+gpu = ["qwen-tts", "torch"]
+dev = ["pytest>=8", "pytest-qt>=4.4"]
 
 [project.scripts]
 voice-studio = "voice_studio.main:main"
