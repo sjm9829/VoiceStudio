@@ -5,6 +5,7 @@ AudioService는 이 인터페이스(FfmpegAdapter 프로토콜)만 의존하므�
 
 from __future__ import annotations
 import json, shutil, subprocess
+from pathlib import Path
 from typing import Protocol
 import numpy as np
 from ..core.errors import FfmpegNotFoundError, UnsupportedAudioError
@@ -19,12 +20,34 @@ class FfmpegAdapter(Protocol):
     def decode_segment_to_flac(self, path: str, start_s: float, end_s: float, out_flac: str) -> str: ...
     def encode_wav(self, pcm: np.ndarray, sample_rate: int, out_path: str) -> str: ...
 
+def bundled_bin_dir() -> "Path | None":
+    """앱 설치 디렉터리의 bin 폴더(frozen: VoiceStudio.exe 옆 bin/). 개발 환경에서는 None."""
+    import sys
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "bin"
+    return None
+
+def _resolve_binary(name: str, override: str | None) -> str | None:
+    """탐색 우선순위: 1) 앱 설치 디렉터리에 포함된 바이너리, 2) 시스템 PATH."""
+    if override:
+        return override
+    bundled = bundled_bin_dir()
+    if bundled is not None:
+        candidate = bundled / f"{name}.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which(name)
+
 class RealFfmpegAdapter:
-    """실제 ffmpeg/ffprobe 바이너리를 사용하는 어댑터."""
+    """실제 ffmpeg/ffprobe 바이너리를 사용하는 어댑터.
+
+    최종 사용자는 FFmpeg를 별도 설치하지 않아도 된다: 설치 프로그램이 앱 디렉터리의
+    bin/ 아래에 ffmpeg.exe/ffprobe.exe를 포함하고, 이 어댑터가 그것을 먼저 찾는다(P12.1-11).
+    """
 
     def __init__(self, ffmpeg: str | None = None, ffprobe: str | None = None):
-        self.ffmpeg = ffmpeg or shutil.which("ffmpeg")
-        self.ffprobe = ffprobe or shutil.which("ffprobe")
+        self.ffmpeg = _resolve_binary("ffmpeg", ffmpeg)
+        self.ffprobe = _resolve_binary("ffprobe", ffprobe)
         if not self.ffmpeg or not self.ffprobe:
             raise FfmpegNotFoundError(f"ffmpeg={self.ffmpeg} ffprobe={self.ffprobe}")
 

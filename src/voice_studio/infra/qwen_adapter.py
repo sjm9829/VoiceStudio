@@ -92,7 +92,8 @@ class RealQwenAdapter:
     """
 
     def __init__(self, model_path: str | None = None, model_id: str = MODEL_ID,
-                 device: str | None = None):
+                 device: str | None = None, flash_attention: bool = False):
+        """flash_attention=True는 optional 가속 시도. 실패 시 표준 attention으로 fallback한다."""
         from qwen_tts import Qwen3TTSModel  # 공식 export
         self.model_id = model_id
         self.model_version = "official-base"
@@ -100,6 +101,15 @@ class RealQwenAdapter:
         kwargs: dict[str, Any] = {}
         if device:
             kwargs["device_map"] = device
+            if device.startswith("cuda"):
+                # VRAM 절약: NVIDIA GPU 로드 시 bfloat16 명시(P12.1-08).
+                kwargs["dtype"] = "bfloat16"
+            if flash_attention:
+                try:
+                    import flash_attn  # noqa: F401
+                    kwargs["attn_implementation"] = "flash_attention_2"
+                except ImportError:
+                    pass  # 표준 attention으로 fallback
         self._model = Qwen3TTSModel.from_pretrained(source, **kwargs)
 
     def create_prompt(self, waveform: np.ndarray, sample_rate: int, ref_text: str) -> VoiceClonePromptSpec:
