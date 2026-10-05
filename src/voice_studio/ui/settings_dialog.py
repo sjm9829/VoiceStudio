@@ -104,9 +104,10 @@ class SettingsDialog(QDialog):
         세부 기술 정보는 logs/diagnosis.log에만 남긴다.
         """
         import subprocess
-        import sys as _sys
+        from ..workers.launcher import diagnostics_command
         try:
-            r = subprocess.run([_sys.executable, "-m", "voice_studio.diagnostics", "--json", "--log"],
+            program, dargs = diagnostics_command()
+            r = subprocess.run([program, *dargs],
                                capture_output=True, text=True, timeout=90,
                                cwd=str(Path(__file__).resolve().parents[2]))
             out = (r.stdout or "").strip().splitlines()

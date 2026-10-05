@@ -88,11 +88,13 @@ def write_log(data: dict) -> None:
         fh.write("\n".join(f"{k}: {v}" for k, v in data["detail"].items()) + "\n")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    """argv 기본은 sys.argv. main.py --diagnostics 모드가 args를 전달한다(P12.3-06)."""
+    args = sys.argv if argv is None else argv
     try:
         data = collect()
         print(json.dumps(data, ensure_ascii=False))
-        if "--log" in sys.argv:
+        if "--log" in args:
             write_log(data)
         return 0
     except Exception as e:

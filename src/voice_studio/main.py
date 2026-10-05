@@ -55,6 +55,9 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv if argv is None else argv)
     if "--smoke-test" in args:
         return run_smoke_test()
+    if "--diagnostics" in args:  # P12.3-06: frozen에서는 exe 진입점으로 진단 실행
+        from voice_studio.diagnostics import main as diagnostics_main
+        return diagnostics_main(args)
     if "--worker" in args:
         i = args.index("--worker")
         if i + 1 >= len(args):
