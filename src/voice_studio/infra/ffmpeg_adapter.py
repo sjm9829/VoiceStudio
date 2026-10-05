@@ -20,19 +20,28 @@ class FfmpegAdapter(Protocol):
     def decode_segment_to_flac(self, path: str, start_s: float, end_s: float, out_flac: str) -> str: ...
     def encode_wav(self, pcm: np.ndarray, sample_rate: int, out_path: str) -> str: ...
 
-def bundled_bin_dir() -> "Path | None":
-    """앱 설치 디렉터리의 bin 폴더(frozen: VoiceStudio.exe 옆 bin/). 개발 환경에서는 None."""
+def bundled_bin_dirs() -> "list[Path]":
+    r"""앱 설치 디렉터리의 bin 후보 폴더들(P12.2-05).
+
+    PyInstaller onedir(6.x)에서 datas는 <설치 폴더>\_internal 아래로 들어가므로
+    VoiceStudio.exe 옆 bin/과 _internal/bin/ 둘 다 확인한다.
+    """
     import sys
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent / "bin"
-    return None
+        exe_dir = Path(sys.executable).resolve().parent
+        return [exe_dir / "bin", exe_dir / "_internal" / "bin"]
+    return []
+
+def bundled_bin_dir() -> "Path | None":
+    """개발 환경에서는 None. frozen에서는 첫 후보(exe 옆 bin)를 돌려준다(하위 호환)."""
+    dirs = bundled_bin_dirs()
+    return dirs[0] if dirs else None
 
 def _resolve_binary(name: str, override: str | None) -> str | None:
     """탐색 우선순위: 1) 앱 설치 디렉터리에 포함된 바이너리, 2) 시스템 PATH."""
     if override:
         return override
-    bundled = bundled_bin_dir()
-    if bundled is not None:
+    for bundled in bundled_bin_dirs():
         candidate = bundled / f"{name}.exe"
         if candidate.is_file():
             return str(candidate)

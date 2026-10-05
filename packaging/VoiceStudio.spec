@@ -40,11 +40,37 @@ a = Analysis(
 )
 
 # 지연 import되는 대형 패키지의 서브모듈/데이터를 통째로 수집한다.
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files, collect_all
 hidden = collect_submodules("qwen_tts") + collect_submodules("faster_whisper") + collect_submodules("transformers")
 a.hiddenimports += [h for h in hidden if h not in a.hiddenimports]
+# qwen_tts: 모델 설정/토크나이저 데이터 파일 누락 시 frozen에서 from_pretrained가 실패한다(P12.2-07).
+a.datas += collect_data_files("qwen_tts", include_py_files=True)
 a.datas += collect_data_files("transformers")
 a.datas += collect_data_files("huggingface_hub")
+# 의존성의 data/DLL 보강(P12.2-08): ctranslate2/tokenizers의 동적 라이브러리와
+# tokenizers rust 확장 데이터, safetensors의 데이터 파일을 명시적으로 수집한다.
+libs, bins, datas = collect_all("ctranslate2")
+a.binaries += bins
+a.datas += datas
+libs, bins, datas = collect_all("tokenizers")
+a.binaries += bins
+a.datas += datas
+libs, bins, datas = collect_all("safetensors")
+a.binaries += bins
+a.datas += datas
+
+# FFmpeg 번들(P12.2-05/06): third_party/bin의 ffmpeg.exe/ffprobe.exe를 설치 폴더의
+# bin/에 두고 RealFfmpegAdapter가 frozen에서 그 위치를 먼저 탐색한다.
+ffmpeg_src = ROOT / "third_party" / "bin"
+if ffmpeg_src.is_dir():
+    for exe_name in ("ffmpeg.exe", "ffprobe.exe"):
+        f = ffmpeg_src / exe_name
+        if f.is_file():
+            a.datas.append((str(f), "bin"))
+# 라이선스 고지(FFMPEG_NOTICE.txt)도 함께 배포한다.
+notice = ROOT / "third_party" / "FFMPEG_NOTICE.txt"
+if notice.is_file():
+    a.datas.append((str(notice), "bin"))
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 

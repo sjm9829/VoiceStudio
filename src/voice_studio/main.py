@@ -15,8 +15,46 @@ def _run_worker(argv: list[str]) -> int:
     return worker_main(argv)
 
 
+def run_smoke_test() -> int:
+    """frozen 빌드 셀프 스모크(P12.2-21).
+
+    Qt/worker 인자 파싱/핵심 모듈 import만 확인하고 종료한다. 모델 다운로드나 GPU
+    생성은 수행하지 않는다(설치 직후 실패 원인을 1차로 좁히는 용도).
+    """
+    try:
+        import PySide6  # noqa: F401
+        from voice_studio.core.paths import ensure_app_dirs, logs_dir
+        ensure_app_dirs()
+        from voice_studio.workers.job_schema import parse_job  # noqa: F401
+        from voice_studio.ui.main_window import MainWindow  # noqa: F401
+        from voice_studio.workers.launcher import worker_command  # noqa: F401
+        from voice_studio.core import config  # noqa: F401
+        _finish_smoke(logs_dir(), "SMOKE_OK", "")
+        return 0
+    except Exception as e:
+        try:
+            from voice_studio.core.paths import logs_dir
+            _finish_smoke(logs_dir(), "SMOKE_FAILED", f"{type(e).__name__}: {e}")
+        except Exception:
+            pass
+        return 1
+
+
+def _finish_smoke(logs_path, status: str, detail: str) -> None:
+    """GUI exe는 stdout이 보이지 않으므로 결과를 logs 파일에도 남긴다(P12.2-21)."""
+    try:
+        logs_path.mkdir(parents=True, exist_ok=True)
+        with open(logs_path / "smoke-test.log", "a", encoding="utf-8") as fh:
+            fh.write(f"{status} {detail}\n")
+    except Exception:
+        pass
+    print(status, detail)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv if argv is None else argv)
+    if "--smoke-test" in args:
+        return run_smoke_test()
     if "--worker" in args:
         i = args.index("--worker")
         if i + 1 >= len(args):
