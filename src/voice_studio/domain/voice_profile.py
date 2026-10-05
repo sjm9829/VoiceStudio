@@ -22,6 +22,7 @@ class VoiceProfile:
     qwen_tts_version: str = "unknown"
     x_vector_only_mode: bool = False
     icl_mode: bool = True
+    ref_code_kind: str = "json"  # "tensor": 실제 정수/실수 텐서, "json": JSON blob(fake/legacy)
     schema_version: int = 1
 
     def to_metadata(self) -> dict[str, Any]:

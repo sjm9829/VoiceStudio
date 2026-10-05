@@ -17,6 +17,7 @@ class FfmpegAdapter(Protocol):
     def waveform(self, path: str, buckets: int) -> list[float]: ...
     def encode_mp3(self, pcm: np.ndarray, sample_rate: int, bitrate_kbps: int, out_path: str) -> str: ...
     def decode_segment_to_flac(self, path: str, start_s: float, end_s: float, out_flac: str) -> str: ...
+    def encode_wav(self, pcm: np.ndarray, sample_rate: int, out_path: str) -> str: ...
 
 class RealFfmpegAdapter:
     """실제 ffmpeg/ffprobe 바이너리를 사용하는 어댑터."""
@@ -80,6 +81,16 @@ class RealFfmpegAdapter:
                  for i in range(buckets)]
         return peaks
 
+    def encode_wav(self, pcm: np.ndarray, sample_rate: int, out_path: str) -> str:
+        """미리 듣기용 임시 WAV(24kHz mono) 인코딩."""
+        raw = np.clip(pcm, -1.0, 1.0).astype(np.float32).tobytes()
+        args = [self.ffmpeg, "-y", "-v", "error", "-f", "f32le", "-ar", str(sample_rate),
+                "-ac", "1", "-i", "-", "-codec:a", "pcm_s16le", out_path]
+        r = subprocess.run(args, input=raw, capture_output=True, timeout=300)
+        if r.returncode != 0:
+            raise UnsupportedAudioError(r.stderr.decode(errors="replace")[:300])
+        return out_path
+
     def encode_mp3(self, pcm: np.ndarray, sample_rate: int, bitrate_kbps: int, out_path: str) -> str:
         raw = np.clip(pcm, -1.0, 1.0).astype(np.float32).tobytes()
         args = [self.ffmpeg, "-y", "-v", "error", "-f", "f32le", "-ar", str(sample_rate),
@@ -123,6 +134,11 @@ class FakeFfmpegAdapter:
         idx = np.linspace(0, data.size, buckets + 1).astype(int)
         return [float(np.max(np.abs(data[idx[i]:idx[i+1]]))) if idx[i+1] > idx[i] else 0.0
                 for i in range(buckets)]
+
+    def encode_wav(self, pcm: np.ndarray, sample_rate: int, out_path: str) -> str:
+        with open(out_path, "wb") as fh:
+            fh.write(b"FAKEWAV" + len(pcm).to_bytes(8, "little"))
+        return out_path
 
     def encode_mp3(self, pcm: np.ndarray, sample_rate: int, bitrate_kbps: int, out_path: str) -> str:
         self.mp3_encoded.append((bitrate_kbps, out_path))

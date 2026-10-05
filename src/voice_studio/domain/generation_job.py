@@ -33,6 +33,7 @@ class GenerationJob:
     script: str
     status: JobStatus = JobStatus.PENDING
     segments: list[str] = field(default_factory=list)
+    gap_flags: list[bool] = field(default_factory=list)  # 문단 경계 플래그(첫 구간 제외)
     failed_chunks: list[int] = field(default_factory=list)
     output_path: str | None = None
     error: dict[str, Any] | None = None

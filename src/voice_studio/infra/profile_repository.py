@@ -108,6 +108,11 @@ class ProfileRepository:
             raise ProfileError(f"ref_spk_embedding dtype이 {EXPECTED_EMB_DTYPE}이 아닙니다: {emb.dtype}")
         if emb.ndim != 1 or emb.size == 0:
             raise ProfileError(f"ref_spk_embedding shape가 올바르지 않습니다: {emb.shape}")
+        code = tensors[REF_CODE_KEY]
+        if not isinstance(code, np.ndarray) or code.ndim < 1 or code.size == 0:
+            raise ProfileError(f"ref_code shape가 올바르지 않습니다: {getattr(code, 'shape', code)}")
+        if code.dtype.kind not in "iuf":
+            raise ProfileError(f"ref_code dtype이 숫자가 아닙니다: {code.dtype}")
 
     def _read_meta(self, meta: Path) -> dict[str, Any]:
         try:
@@ -133,4 +138,5 @@ class ProfileRepository:
             data.setdefault("x_vector_only_mode", False)
             data.setdefault("icl_mode", True)
             data.setdefault("model_id", "Qwen/Qwen3-TTS-12Hz-0.6B-Base")
+        data.setdefault("ref_code_kind", "json")
         return data

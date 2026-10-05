@@ -1,10 +1,18 @@
 """Qwen3-TTS 어댑터.
 
-공식 API 함정 대응:
-- 공식 `_prompt_items_to_voice_clone_prompt()` dict에는 ref_text가 포함되지 않으므로,
-  생성 시 공식 `VoiceClonePromptItem`을 ref_text와 함께 재구성해 **list로 전달**하는 경로를 사용한다.
-- private API 종속은 이 어댑터 안에만 존재한다. UI/서비스 계층은 이 어댑터의 결과(JSON)만 본다.
-- 실제 모델 import는 worker 프로세스에서만 발생한다(지연 import).
+공식 API(qwen_tts) 실제 시그니처 기준(2026-02, QwenLM/Qwen3-TTS main):
+- `Qwen3TTSModel.from_pretrained(repo_id_or_local_path, **kwargs)` — kwargs는 transformers AutoModel로 전달.
+- `create_voice_clone_prompt(ref_audio, ref_text=None, x_vector_only_mode=False) -> List[VoiceClonePromptItem]`
+  (반환은 항상 리스트)
+- `generate_voice_clone(text, language=None, ..., voice_clone_prompt=[item], ...) -> (List[np.ndarray], sample_rate)`
+  (반환은 (wav 리스트, 샘플레이트) 튜플)
+- `VoiceClonePromptItem`는 `from qwen_tts import Qwen3TTSModel, VoiceClonePromptItem` 공식 export.
+- ref_code는 torch.Tensor((T, Q) 또는 (T,)), ref_spk_embedding은 torch.Tensor((D,)).
+
+공식 dict 변환 경로(`_prompt_items_to_voice_clone_prompt`)에는 ref_text가 포함되지 않으므로,
+프로필 저장 시 ref_code/ref_spk_embedding/ref_text/x_vector_only_mode/icl_mode를 모두 영속화하고
+생성 시 공식 VoiceClonePromptItem을 재구성해 **list로 전달**한다.
+private API 종속은 이 어댑터 안에만 존재하고, 실제 모델 import는 worker 프로세스에서만 발생한다.
 """
 
 from __future__ import annotations
@@ -14,10 +22,31 @@ import numpy as np
 
 MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 
+def _to_numpy(value: Any) -> np.ndarray | None:
+    """torch.Tensor/ndarray/list를 numpy로 변환한다. torch.Tensor는 detach().cpu() 후 변환."""
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        return value
+    try:
+        import torch  # 어댑터 내부(worker)에서만 import
+    except ImportError:
+        torch = None  # type: ignore[assignment]
+    if torch is not None and isinstance(value, torch.Tensor):
+        value = value.detach().cpu().numpy()
+    return np.asarray(value)
+
+def _from_numpy(value: np.ndarray | None) -> Any:
+    """저장된 numpy 배열을 공식 API가 기대하는 torch.Tensor로 되돌린다."""
+    if value is None:
+        return None
+    import torch  # 어댑터 내부에서만 import
+    return torch.from_numpy(np.ascontiguousarray(value))
+
 @dataclass
 class VoiceClonePromptSpec:
     """프로필에 영속화되는 복제 프롬프트 데이터. 어댑터가 이것을 공식 객체로 재구성한다."""
-    ref_code: Any | None = None            # 모델이 산출한 ref_code (직렬화 가능 형태)
+    ref_code: Any | None = None            # 공식: torch.Tensor → 어댑터에서 numpy로 보관/저장
     ref_spk_embedding: np.ndarray | None = None
     x_vector_only_mode: bool = False
     icl_mode: bool = True
@@ -48,50 +77,65 @@ class QwenAdapter(Protocol):
     def create_prompt(self, waveform: np.ndarray, sample_rate: int, ref_text: str) -> VoiceClonePromptSpec: ...
     def generate(self, prompt: VoiceClonePromptSpec, text: str, sample_rate: int) -> np.ndarray: ...
 
+def default_device() -> str:
+    """CUDA가 가능하면 cuda:0, 아니면 cpu. worker에서만 호출한다."""
+    try:
+        import torch
+    except ImportError:
+        return "cpu"
+    return "cuda:0" if torch.cuda.is_available() else "cpu"
+
 class RealQwenAdapter:
     """공식 Qwen3-TTS 모델을 사용하는 어댑터. worker 프로세스에서만 생성한다.
 
-    NOTE(P00, 미검증): 공식 qwen_tts 패키지의 정확한 클래스/시그니처는
-    https://github.com/QwenLM/Qwen3-TTS/blob/main/qwen_tts/inference/qwen3_tts_model.py
-    기준이며, 실제 환경 접근이 불가해 아래 경로를 런타임에 재확인해야 한다.
+    model_path가 주어지면 로컬 스냅샷 경로를 from_pretrained에 그대로 사용한다(오프라인 동작).
     """
 
-    def __init__(self, model_id: str = MODEL_ID, device: str | None = None):
-        try:
-            from qwen_tts import Qwen3TTSModel  # type: ignore
-        except ImportError as exc:
-            raise ImportError("qwen_tts 패키지가 설치되어 있지 않습니다.") from exc
+    def __init__(self, model_path: str | None = None, model_id: str = MODEL_ID,
+                 device: str | None = None):
+        from qwen_tts import Qwen3TTSModel  # 공식 export
         self.model_id = model_id
         self.model_version = "official-base"
-        self._model = Qwen3TTSModel.from_pretrained(model_id, device_map=device or "auto")
+        source = model_path or model_id
+        kwargs: dict[str, Any] = {}
+        if device:
+            kwargs["device_map"] = device
+        self._model = Qwen3TTSModel.from_pretrained(source, **kwargs)
 
     def create_prompt(self, waveform: np.ndarray, sample_rate: int, ref_text: str) -> VoiceClonePromptSpec:
-        # 공식: create_voice_clone_prompt(ref_audio=(waveform, sample_rate), ref_text=ref_text,
-        #                                  x_vector_only_mode=False)
-        item = self._model.create_voice_clone_prompt(
-            ref_audio=(waveform, sample_rate), ref_text=ref_text, x_vector_only_mode=False)
-        ref_code = getattr(item, "ref_code", None)
-        emb = getattr(item, "ref_spk_embedding", None)
-        if emb is not None and not isinstance(emb, np.ndarray):
-            emb = np.asarray(emb, dtype=np.float32)
+        # 공식 반환은 List[VoiceClonePromptItem]. 단일 참조 오디오 → 첫 항목 사용.
+        items = self._model.create_voice_clone_prompt(
+            ref_audio=(np.asarray(waveform, dtype=np.float32), int(sample_rate)),
+            ref_text=ref_text, x_vector_only_mode=False)
+        item = items[0]
+        emb = _to_numpy(item.ref_spk_embedding)
+        if emb is not None:
+            emb = np.asarray(emb, dtype=np.float32).reshape(-1)
         return VoiceClonePromptSpec(
-            ref_code=ref_code, ref_spk_embedding=emb,
-            x_vector_only_mode=False, icl_mode=True, ref_text=ref_text)
+            ref_code=_to_numpy(item.ref_code), ref_spk_embedding=emb,
+            x_vector_only_mode=bool(item.x_vector_only_mode), icl_mode=bool(item.icl_mode),
+            ref_text=ref_text)
 
     def generate(self, prompt: VoiceClonePromptSpec, text: str, sample_rate: int) -> np.ndarray:
-        # 공식: generate_voice_clone([VoiceClonePromptItem(...)], text)
-        # ref_text가 dict 경로에서 누락되므로 VoiceClonePromptItem을 직접 재구성해 list로 전달한다.
-        from qwen_tts.core.models import VoiceClonePromptItem  # type: ignore  # private: 어댑터 내부에 한정
+        """공식 VoiceClonePromptItem을 재구성해 list로 전달한다(ref_text 포함)."""
+        from qwen_tts import VoiceClonePromptItem  # 공식 export
         item = VoiceClonePromptItem(
-            ref_code=prompt.ref_code,
-            ref_spk_embedding=prompt.ref_spk_embedding,
-            ref_text=prompt.ref_text,
+            ref_code=_from_numpy(prompt.ref_code),
+            ref_spk_embedding=_from_numpy(prompt.ref_spk_embedding),
             x_vector_only_mode=prompt.x_vector_only_mode,
             icl_mode=prompt.icl_mode,
+            ref_text=prompt.ref_text or None,
         )
-        wav = self._model.generate_voice_clone([item], text)
-        wav = np.asarray(wav[0] if isinstance(wav, (list, tuple)) else wav).squeeze()
-        return wav.astype(np.float32)
+        wavs, out_sr = self._model.generate_voice_clone(text, voice_clone_prompt=[item])
+        wav = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
+        if int(out_sr) != int(sample_rate):
+            # 인터페이스 계약 유지: 요청 샘플레이트로 선형 리샘플(호출자는 24kHz를 기대).
+            duration = wav.size / float(out_sr)
+            n_out = int(duration * sample_rate)
+            src_t = np.arange(wav.size, dtype=np.float64) / out_sr
+            dst_t = np.arange(n_out, dtype=np.float64) / sample_rate
+            wav = np.interp(dst_t, src_t, wav.astype(np.float64)).astype(np.float32)
+        return wav
 
 class FakeQwenAdapter:
     """테스트/오프라인 개발용 가짜 어댑터. 사인파 나레이션을 합성한다."""
