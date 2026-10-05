@@ -13,7 +13,7 @@ class VoiceStudioError(Exception):
 
 class FfmpegNotFoundError(VoiceStudioError):
     code = "E_FFMPEG_NOT_FOUND"
-    user_message = "오디오 처리 프로그램(FFmpeg)을 찾을 수 없습니다. 설치 후 다시 시도해 주세요."
+    user_message = "오디오 처리 구성 요소를 찾을 수 없습니다. 프로그램을 다시 설치해 주세요."
 
 class UnsupportedAudioError(VoiceStudioError):
     code = "E_UNSUPPORTED_AUDIO"

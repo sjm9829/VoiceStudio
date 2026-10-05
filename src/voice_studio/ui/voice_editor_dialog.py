@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import tempfile
 import uuid as uuidlib
 from pathlib import Path
 
@@ -19,7 +18,9 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QPu
                                QLabel, QFileDialog, QCheckBox, QMessageBox, QPlainTextEdit,
                                QProgressBar)
 from ..core import config
-from ..core.errors import VoiceStudioError
+from ..core.errors import (VoiceStudioError, ProfileError, DuplicateNameError,
+                           ConsentRequiredError, TranscriptRequiredError, FfmpegNotFoundError)
+from ..core.paths import preview_cache_dir
 from ..workers.job_schema import build_register_payload
 from ..workers.launcher import worker_command
 from ..workers.linebuffer import JsonlBuffer
@@ -77,8 +78,10 @@ class _PreviewThread(QThread):
     def run(self):
         try:
             pcm = self.audio.decode_preview_segment(self.path, self.start_s, self.end_s)
-            fd, wav_path = tempfile.mkstemp(prefix="vs_preview_", suffix=".wav")
-            os.close(fd)
+            # 관리 경로(%LOCALAPPDATA%\VoiceStudio\cache\preview) 사용(P12.1-14).
+            d = preview_cache_dir()
+            d.mkdir(parents=True, exist_ok=True)
+            wav_path = str(d / f"vs_preview_{uuidlib.uuid4().hex}.wav")
             self.audio.encode_wav(pcm, wav_path)
             self.wav_path = wav_path
             self.ready.emit(wav_path)
@@ -135,7 +138,7 @@ class VoiceEditorDialog(QDialog):
         self.selection_label = QLabel("선택 구간: 없음")
         layout.addWidget(self.selection_label)
 
-        hint = QLabel("15초 정도면 사용 가능하지만 더 길다고 반드시 좋아지지는 않습니다.")
+        hint = QLabel("3초 이상 선택할 수 있습니다. 5~15초를 권장하며, 더 길다고 반드시 좋아지지는 않습니다. 30초 이상은 경고만 표시합니다.")
         layout.addWidget(hint)
 
         text_row = QHBoxLayout()
@@ -193,10 +196,16 @@ class VoiceEditorDialog(QDialog):
             QMessageBox.warning(self, "보이스 스튜디오", "오디오 파일을 열 수 없습니다.")
             return
         self.wave.set_peaks(peaks, duration)
-        self._on_selection(0.0, min(duration, config.REFERENCE_MAX_SECONDS))
+        # 기본 선택을 라벨이 아니라 실제 selection state로 반영(P12.1-04).
+        # 긴 파일을 열어도 worker에는 권장 15초 구간만 전달된다.
+        self.wave.set_selection(0.0, min(duration, config.REFERENCE_TARGET_SECONDS))
 
     def _on_selection(self, start, end):
         self.selection_label.setText(f"선택 구간: {start:.1f}초 ~ {end:.1f}초 ({end - start:.1f}초)")
+        if end - start >= config.REFERENCE_WARN_SECONDS and not getattr(self, "_warned_long", False):
+            self._warned_long = True
+            QMessageBox.information(self, "보이스 스튜디오",
+                                    "30초 이상의 참조 음성도 사용할 수 있지만 더 길다고 반드시 좋아지지는 않습니다.")
 
     def preview_selection(self):
         """선택 구간만 임시 WAV로 만들어 실제로 재생하고, 재생 후 임시 파일을 정리한다."""
@@ -262,15 +271,38 @@ class VoiceEditorDialog(QDialog):
                 self.context.profile_service.rename(self.uuid, self.name_edit.text())
                 self.accept()
                 return
-            if not self.consent.isChecked():
-                QMessageBox.information(self, "보이스 스튜디오", "권한 확인에 체크해 주세요.")
-                return
-            if not self.transcript_edit.toPlainText().strip():
-                QMessageBox.information(self, "보이스 스튜디오", "참조 음성의 대사를 입력해 주세요.")
-                return
+            self._validate_register_inputs()
             self._start_register_worker()
         except VoiceStudioError as exc:
-            QMessageBox.warning(self, "등록 실패", exc.user_message)
+            # 모델 미다운로드 등 사용자 안내가 필요한 오류(P12.1-06/07)
+            QMessageBox.warning(self, "보이스 스튜디오", exc.user_message)
+        except OSError as exc:
+            QMessageBox.warning(self, "보이스 스튜디오", f"작업 파일을 준비할 수 없습니다: {exc}")
+
+
+    def _validate_register_inputs(self):
+        """register worker 시작 전 UI 입력 검증(P12.1-06)."""
+        name = self.name_edit.text().strip()
+        if not name:
+            raise ProfileError("목소리 이름을 입력해 주세요.", user_message="목소리 이름을 입력해 주세요.")
+        existing = [p.name for p in self.context.profile_service.list_profiles() if p.uuid != self.uuid]
+        if name in existing:
+            raise DuplicateNameError()
+        if not self.source_path or not Path(self.source_path).is_file():
+            raise ProfileError("참조 파일 없음", user_message="참조 파일을 선택해 주세요.")
+        if self.wave.end_s <= self.wave.start_s:
+            raise ProfileError("선택 구간 없음", user_message="선택 구간이 없습니다. 파형에서 구간을 선택해 주세요.")
+        if self.wave.end_s - self.wave.start_s < config.REFERENCE_APP_MIN_SECONDS:
+            raise ProfileError("선택 구간 짧음", user_message=f"선택 구간이 너무 짧습니다. {config.REFERENCE_APP_MIN_SECONDS:.0f}초 이상 선택해 주세요.")
+        if not self.transcript_edit.toPlainText().strip():
+            raise TranscriptRequiredError()
+        if not self.consent.isChecked():
+            raise ConsentRequiredError()
+        try:
+            from ..infra.ffmpeg_adapter import RealFfmpegAdapter
+            RealFfmpegAdapter()
+        except FfmpegNotFoundError:
+            raise FfmpegNotFoundError()
 
     def _start_register_worker(self):
         from ..core.paths import safe_job_cache_dir
