@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, Q
 from ..core.errors import VoiceStudioError, ProfileError, ModelNotDownloadedError
 from ..workers.job_schema import build_narrate_payload
 from ..workers.launcher import worker_command
+from ..core.paths import safe_job_cache_dir
 from ..workers.linebuffer import JsonlBuffer
 from .voice_manager_dialog import VoiceManagerDialog
 from .settings_dialog import SettingsDialog
@@ -145,7 +146,6 @@ class MainWindow(QMainWindow):
         output_dir.mkdir(parents=True, exist_ok=True)
         # worker 결과는 작업 캐시(jobs/<job_id>/result.mp3)에 두고, MP3 저장 시
         # 사용자 위치로 복사한다(P12.2-04). 실패/취소 파일이 Music 폴더에 남지 않는다.
-        from ..core.paths import safe_job_cache_dir
         job_id = str(uuidlib.uuid4())
         output_path = str(safe_job_cache_dir(job_id) / "result.mp3")
         return build_narrate_payload(
@@ -156,7 +156,9 @@ class MainWindow(QMainWindow):
 
     def _start_worker(self, payload: dict):
         import json
-        from ..core.paths import safe_job_cache_dir
+        # 연속 생성 시 이전 성공 결과 캐시를 먼저 정리한다(P12.3-18).
+        self._cleanup_job()
+        self._last_output = None
         job_id = payload["job_id"]
         job_dir = safe_job_cache_dir(job_id)
         job_file = job_dir / "job.json"
@@ -165,7 +167,6 @@ class MainWindow(QMainWindow):
         self._buffer = JsonlBuffer()
         self._stderr_chunks = []
         self._result_received = False
-        self._last_output = None  # 연속 생성 시 이전 결과 잔류(stale) 방지
         program, args = worker_command(str(job_file))
         self._worker = QProcess(self)
         self._worker.readyReadStandardOutput.connect(self._on_worker_output)
@@ -229,7 +230,8 @@ class MainWindow(QMainWindow):
             self._set_status("done", 0, 0)
             self.save_btn.setEnabled(True)
             self.play_btn.setEnabled(True)
-            self._cleanup_job(keep_output=True)
+            # 성공: 캐시 result.mp3를 보존(MP3 저장/들어보기용). 폴더 삭제는
+            # MP3 저장 성공 시 또는 새 생성 시작/앱 종료 시 수행한다(P12.3-18).
         else:
             self.status_label.setText(self.status_label.text() or "작업이 실패했습니다.")
             self._cleanup_job()
@@ -250,6 +252,7 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
         self._job_dir = None
+        self._last_output = None if not keep_output else self._last_output
 
     def _set_status(self, phase: str, index: int, total: int):
         text = PHASE_KO.get(phase, "")
@@ -297,5 +300,17 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "MP3 저장", suggested, "MP3 (*.mp3)")
         if not path:
             return
-        shutil.copyfile(self._last_output, path)
+        try:
+            shutil.copyfile(self._last_output, path)
+        except OSError as e:
+            QMessageBox.warning(self, "보이스 스튜디오", f"MP3를 저장하지 못했습니다: {e}")
+            return
+        # P12.3-18: 캐시 job 폴더를 삭제하고 _last_output을 사용자 파일로 교체.
+        self._cleanup_job()
+        self._last_output = path
         QMessageBox.information(self, "보이스 스튜디오", f"MP3를 저장했습니다:\n{path}")
+
+    def closeEvent(self, event):
+        """정상 종료 시 미저장 생성 결과 캐시를 정리한다(P12.3-18)."""
+        self._cleanup_job()
+        super().closeEvent(event)

@@ -70,6 +70,31 @@ def cleanup_preview_cache(max_age_hours: float = 24.0) -> int:
             continue  # 재생 프로그램이 잡고 있으면 다음 시작에 다시 시도
     return removed
 
+def cleanup_stale_jobs(max_age_hours: float = 24.0) -> int:
+    """startup에서 오래된 작업 캐시 폴더(jobs/<uuid>)를 정리한다(P12.3-19).
+
+    앱 비정상 종료 시 남은 cache/jobs/<uuid>를 제거한다. 시작 시점에는 활성
+    worker가 없으므로 max_age보다 오래된 폴더 전부를 삭제해도 안전하다.
+    프로필/모델/설정/로그 폴더는 절대 건드리지 않는다.
+    """
+    import shutil, time
+    d = jobs_cache_dir()
+    if not d.is_dir():
+        return 0
+    now = time.time()
+    removed = 0
+    for entry in d.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            if now - entry.stat().st_mtime > max_age_hours * 3600:
+                shutil.rmtree(entry, ignore_errors=True)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def safe_job_cache_dir(job_id: str) -> Path:
     """작업별 임시 폴더. job_id는 uuid이므로 경로 탈출 위험이 없다."""
     d = jobs_cache_dir() / job_id

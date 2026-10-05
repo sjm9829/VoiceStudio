@@ -68,9 +68,10 @@ def main(argv: list[str] | None = None) -> int:
     from PySide6.QtWidgets import QApplication
     from voice_studio.app_context import create_context
     from voice_studio.ui.main_window import MainWindow
-    from voice_studio.core.paths import ensure_app_dirs, cleanup_preview_cache
+    from voice_studio.core.paths import cleanup_stale_jobs, ensure_app_dirs, cleanup_preview_cache
     ensure_app_dirs()
     cleanup_preview_cache()  # 시작 시 남은 미리듣기 임시 WAV 정리(P12.1-14)
+    cleanup_stale_jobs()  # 비정상 종료로 남은 작업 캐시 정리(P12.3-19)
     app = QApplication(args)
     window = MainWindow(create_context())
     window.show()
