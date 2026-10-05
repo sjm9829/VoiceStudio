@@ -139,3 +139,35 @@ P01~P11 소스·테스트 1차 구현 완료. P09~P11 일부(설정 UX/통합/�
 
 ### 테스트
 - non-GPU 전체: 106 passed / 6 skipped / 0 failed (P12.1 기준 85+5에서 증가).
+
+## P12.3 Final Packaging Blockers
+
+### 코드 수준 완료
+- P12.3-01/22 collect_all 반환 계약: `packaging/spec_helpers.apply_collect`로 datas/binaries/hiddenimports를 올바르게 매핑(test_p12_3_packaging).
+- P12.3-02 spec repository root: SPECPATH 계약 기반 경로 존재 regression.
+- P12.3-03 FFmpeg binary build prerequisite: `build_windows.bat`에서 ffmpeg.exe/ffprobe.exe 부재 시 빌드 중단.
+- P12.3-04 FFmpeg license 검증 스크립트(`scripts/check_ffmpeg.py`: 실행 가능/libmp3lame/GPL 플래그/buildconf 출력).
+- P12.3-05 `scripts/check_dist.py`: dist 파일 경로가 `RealFfmpegAdapter._resolve_binary` 탐색 경로와 일치 검증.
+- P12.3-06/07 frozen diagnostics dispatch: `main.py --diagnostics`, `launcher.diagnostics_command`, dev/frozen 명령 형태 regression.
+- P12.3-08/09/10/23 model_path 필수: register/narrate 모두 `ModelNotDownloadedError`, HF repo fallback은 명시적 opt-in만.
+- P12.3-11/12 torch+torchaudio 동일 CUDA index 설치, 설치 전후 TORCH/TORCHAUDIO 버전 기록, pip check.
+- P12.3-13 CUDA_TAG 환경변수로 조합 교체 가능(기본 cu126).
+- P12.3-14 `check_cuda.py`에 torchaudio import 및 torch 버전 family 일치 검사 추가.
+- P12.3-17 frozen smoke 확장: PySide6/worker·diagnostics dispatch/FFmpeg/FFprobe/heavy runtime(torch, torchaudio, CUDA, GPU, dtype policy, qwen_tts, Qwen3TTSModel). heavy 검사는 `heavy_smoke.py`로 분리해 일반 GUI heavy import 0건 계약 유지. 개발 환경에서는 heavy 미설치를 SKIP 처리, frozen에서는 FAIL.
+- P12.3-18 성공 결과 캐시 lifecycle: 새 생성 시작 시 이전 캐시 삭제, MP3 저장 성공 후 캐시 폴더 삭제 및 `_last_output`을 사용자 파일로 교체, 앱 정상 종료 시 미저장 캐시 삭제, MP3 저장 OSError 사용자 안내.
+- P12.3-19 stale jobs startup cleanup: `paths.cleanup_stale_jobs`(24h 이상 cache/jobs/<uuid> 삭제, 프로필/모델/설정 비접촉) + main 시작 호출.
+- P12.3-24 VoiceStudioError positional 2-arg 오용 AST 검사 테스트.
+- P12.3-25 동시 worker 1개 제한: `core/job_coordinator.JobCoordinator`를 AppContext에 두고 narrate/register 시작 시 try_acquire, 종료/닫힘 시 release. 동시 시작 거절 regression.
+- P12.3-20/26/27 P13 실기 체크리스트 문서 작성(docs/08_P13_WINDOWS_GPU_CHECKLIST.md): VRAM 측정 시점 A~H, ffmpeg.exe orphan 확인, 오디오 sanity 기준.
+
+### Windows 실기 대기(P13에서만 확인 가능)
+- frozen PyInstaller 빌드/Inno 설치, bundled ffmpeg 실기 탐색, `--smoke-test`/`--diagnostics` 실기 실행.
+- P12.3-21 FFMPEG_NOTICE 최종 확정: 실제 binary의 `-version` configuration/-buildconf 출력으로 license/GPL 여부/libmp3lame 확인 전까지 고지는 provisional. 현재 NOTICE에 근거 요건 명시.
+- P12.3-16 torch DLL/CUDA runtime DLL의 실제 frozen 수집 범위(실기 import error 시에만 spec 보강).
+- FP16 실제 생성 품질, VRAM 측정 A~H, ffmpeg orphan, 오디오 sanity.
+
+### 테스트
+- non-GPU 전체: 136 passed / 6 skipped / 0 failed (P12.2 기준 106+30 증가).
+
+READY FOR P13 WINDOWS GPU E2E (코드 검토 레벨 blocker는 모두 처리, 남은 항목은 위 실기 대기 목록)
+

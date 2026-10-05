@@ -2,8 +2,14 @@ FFmpeg redistribution notice (VoiceStudio bundled ffmpeg/ffprobe)
 ================================================================
 
 VoiceStudio ships ffmpeg.exe and ffprobe.exe in its install directory
-(bin/). We use a LGPL-licensed FFmpeg build (configured with --enable-lgpl;
-libmp3lame included under LGPL). We do NOT ship a GPL build.
+(bin/). We intend to ship a LGPL-licensed FFmpeg build (libmp3lame included).
+We do NOT ship a GPL build.
+
+NOTE (P12.3-21): the final license statement must be confirmed against the
+actual shipped binary with scripts/check_ffmpeg.py (ffmpeg -version
+configuration line and -buildconf). Until that check runs on the real
+Windows build, the LGPL wording above is provisional and the confirmed
+configuration output is the authoritative basis.
 
 Source code and build configuration for the exact build we ship are
 obtained from the FFmpeg project (https://ffmpeg.org). The FFmpeg source
