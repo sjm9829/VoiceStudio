@@ -1,0 +1,131 @@
+"""FFmpeg/ffprobe 어댑터. 모든 ffmpeg 호출을 이 모듈 뒤로 은닉한다.
+
+AudioService는 이 인터페이스(FfmpegAdapter 프로토콜)만 의존하므로 테스트에서 FakeFfmpegAdapter로 치환한다.
+"""
+
+from __future__ import annotations
+import json, shutil, subprocess
+from typing import Protocol
+import numpy as np
+from ..core.errors import FfmpegNotFoundError, UnsupportedAudioError
+
+SUPPORTED_SUFFIXES = (".mp3", ".m4a", ".wav", ".flac")
+
+class FfmpegAdapter(Protocol):
+    def probe(self, path: str) -> dict: ...
+    def decode_segment(self, path: str, start_s: float, end_s: float, sample_rate: int) -> np.ndarray: ...
+    def waveform(self, path: str, buckets: int) -> list[float]: ...
+    def encode_mp3(self, pcm: np.ndarray, sample_rate: int, bitrate_kbps: int, out_path: str) -> str: ...
+    def decode_segment_to_flac(self, path: str, start_s: float, end_s: float, out_flac: str) -> str: ...
+
+class RealFfmpegAdapter:
+    """실제 ffmpeg/ffprobe 바이너리를 사용하는 어댑터."""
+
+    def __init__(self, ffmpeg: str | None = None, ffprobe: str | None = None):
+        self.ffmpeg = ffmpeg or shutil.which("ffmpeg")
+        self.ffprobe = ffprobe or shutil.which("ffprobe")
+        if not self.ffmpeg or not self.ffprobe:
+            raise FfmpegNotFoundError(f"ffmpeg={self.ffmpeg} ffprobe={self.ffprobe}")
+
+    def _run(self, args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(args, capture_output=True, text=True, timeout=300)
+
+    def probe(self, path: str) -> dict:
+        if not path.lower().endswith(SUPPORTED_SUFFIXES):
+            raise UnsupportedAudioError(f"unsupported suffix: {path}")
+        r = self._run([self.ffprobe, "-v", "error", "-print_format", "json",
+                       "-show_format", "-show_streams", path])
+        if r.returncode != 0:
+            raise UnsupportedAudioError(r.stderr.strip()[:300])
+        data = json.loads(r.stdout)
+        fmt = data.get("format", {})
+        audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
+        if audio is None:
+            raise UnsupportedAudioError("no audio stream")
+        return {
+            "duration": float(fmt.get("duration") or audio.get("duration") or 0.0),
+            "format_name": fmt.get("format_name", ""),
+            "sample_rate": int(audio.get("sample_rate", 0)),
+            "channels": int(audio.get("channels", 0)),
+            "codec": audio.get("codec_name", ""),
+        }
+
+    def decode_segment(self, path: str, start_s: float, end_s: float, sample_rate: int) -> np.ndarray:
+        args = [self.ffmpeg, "-v", "error", "-ss", f"{start_s:.3f}", "-to", f"{end_s:.3f}",
+                "-i", path, "-f", "f32le", "-ac", "1", "-ar", str(sample_rate), "-"]
+        r = subprocess.run(args, capture_output=True, timeout=300)
+        if r.returncode != 0:
+            raise UnsupportedAudioError(r.stderr.decode(errors="replace")[:300])
+        return np.frombuffer(r.stdout, dtype=np.float32)
+
+    def decode_segment_to_flac(self, path: str, start_s: float, end_s: float, out_flac: str) -> str:
+        args = [self.ffmpeg, "-y", "-v", "error", "-ss", f"{start_s:.3f}", "-to", f"{end_s:.3f}",
+                "-i", path, "-ac", "1", "-ar", "24000", "-sample_fmt", "s32", out_flac]
+        r = self._run(args)
+        if r.returncode != 0:
+            raise UnsupportedAudioError(r.stderr.strip()[:300])
+        return out_flac
+
+    def waveform(self, path: str, buckets: int) -> list[float]:
+        """전체 파일을 저해상도 mono 8kHz f32로 디코딩해 peak envelope 버킷으로 축소."""
+        args = [self.ffmpeg, "-v", "error", "-i", path, "-f", "f32le", "-ac", "1", "-ar", "8000", "-"]
+        r = subprocess.run(args, capture_output=True, timeout=600)
+        if r.returncode != 0:
+            raise UnsupportedAudioError(r.stderr.decode(errors="replace")[:300])
+        data = np.frombuffer(r.stdout, dtype=np.float32)
+        if data.size == 0:
+            return [0.0] * buckets
+        idx = np.linspace(0, data.size, buckets + 1).astype(int)
+        peaks = [float(np.max(np.abs(data[idx[i]:idx[i+1]]))) if idx[i+1] > idx[i] else 0.0
+                 for i in range(buckets)]
+        return peaks
+
+    def encode_mp3(self, pcm: np.ndarray, sample_rate: int, bitrate_kbps: int, out_path: str) -> str:
+        raw = np.clip(pcm, -1.0, 1.0).astype(np.float32).tobytes()
+        args = [self.ffmpeg, "-y", "-v", "error", "-f", "f32le", "-ar", str(sample_rate),
+                "-ac", "1", "-i", "-", "-codec:a", "libmp3lame", "-b:a", f"{bitrate_kbps}k",
+                "-ac", "1", out_path]
+        r = subprocess.run(args, input=raw, capture_output=True, timeout=600)
+        if r.returncode != 0:
+            raise UnsupportedAudioError(r.stderr.decode(errors="replace")[:300])
+        return out_path
+
+class FakeFfmpegAdapter:
+    """ffmpeg 미설치 환경(개발/테스트)용 가짜 어댑터. 사인파를 합성한다."""
+
+    def __init__(self, duration: float = 10.0, sample_rate: int = 24000):
+        self.duration = duration
+        self.sample_rate = sample_rate
+        self.mp3_encoded: list[tuple[int, str]] = []
+
+    def probe(self, path: str) -> dict:
+        if not path.lower().endswith(SUPPORTED_SUFFIXES):
+            raise UnsupportedAudioError(f"unsupported suffix: {path}")
+        return {"duration": self.duration, "format_name": "fake", "sample_rate": self.sample_rate,
+                "channels": 1, "codec": "pcm_f32le"}
+
+    def decode_segment(self, path: str, start_s: float, end_s: float, sample_rate: int) -> np.ndarray:
+        if end_s <= start_s or start_s < 0 or end_s > self.duration:
+            raise UnsupportedAudioError(f"bad range {start_s}-{end_s}")
+        t = np.arange(int((end_s - start_s) * sample_rate), dtype=np.float32) / sample_rate
+        return 0.25 * np.sin(2 * np.pi * 220.0 * t).astype(np.float32)
+
+    def decode_segment_to_flac(self, path: str, start_s: float, end_s: float, out_flac: str) -> str:
+        pcm = self.decode_segment(path, start_s, end_s, 24000)
+        np.save(out_flac + ".npy", pcm)
+        with open(out_flac, "wb") as fh:
+            fh.write(b"FAKEFLAC" + len(pcm).to_bytes(8, "little"))
+        return out_flac
+
+    def waveform(self, path: str, buckets: int) -> list[float]:
+        n = max(1, int(self.duration * 8))
+        data = 0.25 * np.sin(2 * np.pi * 220.0 * np.arange(n) / 8).astype(np.float32)
+        idx = np.linspace(0, data.size, buckets + 1).astype(int)
+        return [float(np.max(np.abs(data[idx[i]:idx[i+1]]))) if idx[i+1] > idx[i] else 0.0
+                for i in range(buckets)]
+
+    def encode_mp3(self, pcm: np.ndarray, sample_rate: int, bitrate_kbps: int, out_path: str) -> str:
+        self.mp3_encoded.append((bitrate_kbps, out_path))
+        with open(out_path, "wb") as fh:
+            fh.write(b"FAKEMP3" + len(pcm).to_bytes(8, "little"))
+        return out_path

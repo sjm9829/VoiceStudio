@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-studio"
+version = "0.1.0"
+description = "보이스 스튜디오 - 등록한 목소리로 나레이션을 만드는 로컬 음성 생성 프로그램"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+ui = ["PySide6>=6.6"]
+audio = ["numpy>=1.26", "safetensors>=0.4"]
+transcribe = ["faster-whisper>=1.0"]
+dev = ["pytest>=8", "pytest-qt>=4.4", "numpy>=1.26", "safetensors>=0.4"]
+
+[project.scripts]
+voice-studio = "voice_studio.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gpu: 실제 Qwen 모델/CUDA가 필요한 opt-in 테스트"]
