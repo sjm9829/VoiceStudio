@@ -16,6 +16,7 @@ from .services.audio_service import AudioService
 from .services.profile_service import ProfileService
 from .services.model_manager import ModelManager
 from .services.transcription_service import FasterWhisperTranscriber
+from .core.job_coordinator import JobCoordinator
 
 class AppContext:
     """의존성 조립. 무거운 모델 의존성은 worker/서비스 내부에서 지연 import된다."""
@@ -35,6 +36,7 @@ class AppContext:
         self.model_manager = ModelManager()
         self.transcriber = FasterWhisperTranscriber()  # 실제 구현, cpu/int8 지연 로드
         self.profile_service = ProfileService(self.profile_repository, self.audio)
+        self.jobs = JobCoordinator()  # 동시 worker 1개 제한(P12.3-25)
 
 def dev_context(fake_audio=None):
     """테스트/개발용 가짜 컨텍스트(ffmpeg/qwen 미설치 환경). fake 어댑터는 여기서만 사용한다."""
@@ -51,6 +53,7 @@ def dev_context(fake_audio=None):
     ctx.profile_service = ProfileService(ctx.profile_repository, ctx.audio, FakeQwenAdapter())
     ctx.model_manager = ModelManager()
     ctx.transcriber = FakeTranscriber()
+    ctx.jobs = JobCoordinator()
     return ctx
 
 def create_context() -> AppContext:

@@ -122,7 +122,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "보이스 스튜디오", "대본을 입력해 주세요.")
             return
         try:
-            self._start_worker(self._build_job(profile_uuid, script))
+            if not self._start_worker(self._build_job(profile_uuid, script)):
+                return  # 다른 worker 실행 중(P12.3-25)
         except VoiceStudioError as e:
             # 모델 미다운로드/프로필 오류 등 생성 시작 실패를 UI에서 안내(P12.1-07).
             QMessageBox.warning(self, "보이스 스튜디오", str(e))
@@ -154,8 +155,12 @@ class MainWindow(QMainWindow):
             bitrate_kbps=int(self.context.settings.get("mp3_bitrate_kbps", 192)),
             model_path=self.context.model_manager.model_path())
 
-    def _start_worker(self, payload: dict):
+    def _start_worker(self, payload: dict) -> bool:
         import json
+        # 동시 worker 1개 제한(P12.3-25): register 등 다른 worker 실행 중이면 시작하지 않는다.
+        if not self.context.jobs.try_acquire():
+            QMessageBox.warning(self, "보이스 스튜디오", "다른 작업이 실행 중입니다. 완료 후 다시 시도해 주세요.")
+            return False
         # 연속 생성 시 이전 성공 결과 캐시를 먼저 정리한다(P12.3-18).
         self._cleanup_job()
         self._last_output = None
@@ -179,6 +184,7 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setVisible(True)
         self._cancel_requested = False
         self._set_status("model_loading", 0, 0)
+        return True
 
     def _on_worker_output(self):
         if self._worker is None:
@@ -223,6 +229,7 @@ class MainWindow(QMainWindow):
                 pass
         self.cancel_btn.setVisible(False)
         self.generate_btn.setEnabled(True)
+        self.context.jobs.release()  # P12.3-25: 종료 시 worker 슬롯 반납
         if self._cancel_requested:
             self.status_label.setText("작업을 취소했습니다.")
             self._cleanup_job()
@@ -311,6 +318,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "보이스 스튜디오", f"MP3를 저장했습니다:\n{path}")
 
     def closeEvent(self, event):
-        """정상 종료 시 미저장 생성 결과 캐시를 정리한다(P12.3-18)."""
+        """정상 종료 시 미저장 생성 결과 캐시를 정리하고 worker 슬롯을 반납한다."""
+        self.context.jobs.release()
         self._cleanup_job()
         super().closeEvent(event)

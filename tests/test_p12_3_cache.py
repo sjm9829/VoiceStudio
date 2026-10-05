@@ -40,6 +40,8 @@ class _FakeContext:
         self.profile_service = types.SimpleNamespace(list_profiles=lambda: [])
         self.profile_repository = types.SimpleNamespace(root=root / "profiles")
         self.model_manager = types.SimpleNamespace(model_path=lambda: "", status_text=lambda: "")
+        from voice_studio.core.job_coordinator import JobCoordinator
+        self.jobs = JobCoordinator()
     def save_settings(self, data):
         self.saved.append(data)
 

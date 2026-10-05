@@ -348,6 +348,11 @@ class VoiceEditorDialog(QDialog):
         # stderr는 진단용. UI에는 보이지 않게 유지한다.
         pass
 
+        def closeEvent(self, event):
+        # P12.3-25: 대화상자가 닫히면 worker 슬롯을 반납한다(등록 중 닫기 포함).
+        self.context.jobs.release()
+        super().closeEvent(event)
+
     def _on_register_finished(self, code, status):
         if self._worker is not None:
             try:
