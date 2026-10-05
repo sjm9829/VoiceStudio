@@ -76,3 +76,31 @@ P01~P11 소스·테스트 1차 구현 완료. P09~P11 일부(설정 UX/통합/�
 실제 Windows + NVIDIA GPU + Qwen 모델 + FFmpeg + packaged exe에서의 E2E(등록→재시작→대본→생성→MP3)는 이 Linux 환경에서 실행 불가 → **미검증**.
 검증 절차는 README의 P13 체크리스트 및 `pytest -m gpu` 참조.
 
+## P12.1 Runtime Blocker Fix (2차: 실행 차단 버그 제거, 코드 레벨 완료)
+
+### 코드 수준 완료 (실제 코드/테스트로 검증한 것)
+- **P12.1-01** `create_context()`를 `app_context.py`에 명시 추가. production 전용, fake 어댑터 0건. `test_main_context_factory.py`로 검증.
+- **P12.1-02** worker `_make_services()`가 `RealFfmpegAdapter`를 생성(Protocol 인스턴스화 제거). worker 계약 테스트로 검증.
+- **P12.1-03** 등록 결과 이벤트가 존재하지 않는 `profile.profile_dir`를 참조하지 않는다. repository `path_for()` 사용, 이벤트는 profile_uuid/name 중심.
+- **P12.1-04** 긴 파일 로드 시 기본 선택을 라벨이 아니라 실제 `wave.set_selection(0, min(duration, REFERENCE_TARGET_SECONDS))`로 반영. 10분 파일 regression 테스트(start=0, end=15) 통과. 사용자는 15초 이상도 자유 선택 가능.
+- **P12.1-05** `REFERENCE_APP_MIN_SECONDS = 3.0`로 명칭/주석 정리(Qwen 공식 하드 제한 아님을 명시), UI 안내 문구 일치. 30초 이상은 경고 1회만 표시(강제 제한 없음).
+- **P12.1-06** 등록 전 UI 검증: 파일 존재/이름 비어 있지 않음/중복 이름/start<end/앱 최소 길이/대사/권한/모델 다운로드/FFmpeg 사용 가능. 모델·FFmpeg 누락 시 traceback 대신 사용자 메시지.
+- **P12.1-07** `_build_job()`/등록 시작의 `VoiceStudioError`/`OSError`를 `QMessageBox`로 처리. 등록 화면도 동일.
+- **P12.1-08** CUDA 로드 시 `dtype=bfloat16` 명시. flash-attention은 optional로만 시도(import 실패 시 표준 attention fallback).
+- **P12.1-11** FFmpeg 탐색 우선순위: frozen 시 `sys.executable` 옆 `bin/ffmpeg.exe` → 시스템 PATH.
+- **P12.1-14** 미리듣기 임시 WAV를 `%LOCALAPPDATA%\VoiceStudio\cache\preview` 관리 경로로 이동, 시작 시 24시간 경과 파일 정리(삭제 실패는 다음 시작에 재시도). 미리듣기 스레드의 `preview_cache_dir` import 누락(NameError)도 수정.
+- **P12.1-15** 프로필 atomic 저장(`.tmp-` → rename) 유지, `list_profiles()`는 손상/미완료 프로필을 `last_skipped`로 기록.
+- **P12.1-10** `build_windows.bat`가 현재 pyproject와 일치(`.[dev]` + torch CUDA wheel 공식 경로 + qwen-tts + check_cuda.py). 존재하지 않는 `ui,audio,transcribe` extras 참조 제거.
+- **P12.1-12** `packaging/VoiceStudio.spec` 추가(hiddenimports: qwen_tts/torch/transformers/tokenizers/safetensors/huggingface_hub/faster_whisper/ctranslate2/PySide6.QtMultimedia + collect_submodules/data).
+- **P12.1-18** 선택 구간 regression 테스트: 600초 파일 기본 0~15초, 핸들 75~87초 등록 시 job에 실제 값 전달, 검증 차단 케이스(이름/길이/중복/모델) 전부 테스트.
+
+### 미검증 (실기 확인 필요)
+- 실제 Qwen Windows CUDA(bfloat16/flash-attn fallback), 실제 RTX GPU, worker 종료 후 nvidia-smi VRAM 반환.
+- P12.1-09 모델 다운로드: 코드는 `.complete` 마커 + 핵심 파일 검증 순서로 설계되었으나 실제 snapshot_download/from_pretrained 일치는 실기 필요.
+- FFmpeg 통합 테스트(실기 WAV→MP3→probe 등 5건): 이 환경에 ffmpeg가 없어 skip.
+- frozen PyInstaller 빌드(spec 실제 빌드), Inno installer, bundled ffmpeg 라이선스(앱 배포용 LGPL build 선택) 확인.
+- Windows startup smoke test(`pytest -m gpu` / P13 시나리오 전체).
+
+### 테스트(정확한 숫자)
+- `uv run pytest` (LD_LIBRARY_PATH에 로컬 libGL, offscreen): **84 passed, 5 skipped** (ffmpeg 실기 5 + GPU opt-in skip).
+- 이 환경 한정: pytest-qt UI 실행 테스트가 libGL 없이는 불가했으나 로컬 libGL 경로로 해소.
