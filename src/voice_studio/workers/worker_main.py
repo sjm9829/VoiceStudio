@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 
 import traceback
-from voice_studio.core.errors import VoiceStudioError
+from voice_studio.core.errors import ModelNotDownloadedError, VoiceStudioError
 from voice_studio.core.paths import worker_logs_dir
 from voice_studio.workers.job_schema import JobSchemaError, parse_job
 from voice_studio.workers.protocol import emit, error_event, result_event, status_event, progress_event
@@ -47,20 +47,18 @@ def _write_failure_log(job, exc: Exception) -> None:
 
 
 def _require_model_path(job) -> str:
-    """production worker는 로컬 스냅샷 경로를 필수로 요구한다(P12.2-26).
+    """production worker는 로컬 스냅샷 경로를 필수로 요구한다(P12.2-26/P12.3-08).
 
     비어 있으면 HF 자동 다운로드(수 GB 예상치 못한 트래픽/오랜 대기) 대신
-    E_MODEL_NOT_DOWNLOADED 오류로 명확히 실패한다.
+    ModelNotDownloadedError(코드 E_MODEL_NOT_DOWNLOADED)로 명확히 실패한다.
+    VoiceStudioError의 positional 인수는 detail 하나뿐이므로(P12.3-24) 구체적
+    subclass를 사용하고, UI 메시지는 class user_message를 쓴다.
     """
     path = (getattr(job, "model_path", "") or "").strip()
     if not path:
-        raise VoiceStudioError(
-            "E_MODEL_NOT_DOWNLOADED",
-            "음성 모델이 아직 받아지지 않았습니다. 설정에서 모델을 받아 주세요.")
-    if not Path(path).exists():
-        raise VoiceStudioError(
-            "E_MODEL_NOT_DOWNLOADED",
-            "음성 모델 폴더를 찾을 수 없습니다. 설정에서 모델을 다시 받아 주세요.")
+        raise ModelNotDownloadedError("worker job에 model_path가 없습니다.")
+    if not Path(path).is_dir():
+        raise ModelNotDownloadedError(f"model path not found: {path}")
     return path
 
 
@@ -96,12 +94,13 @@ def run_register(job) -> None:
 
 
 def run_narrate(job) -> None:
+    model_path = _require_model_path(job)  # P12.3-09: narrate도 HF fallback 금지
     emit(status_event("model_loading", job_id=job.job_id))
     repo, audio, service = _make_services(job.profile_dir)
     from voice_studio.infra.qwen_adapter import RealQwenAdapter, default_device
     from voice_studio.services.narration_service import NarrationService
     from voice_studio.domain.generation_job import GenerationJob, JobStatus
-    qwen = RealQwenAdapter(model_path=job.model_path or None, device=default_device())
+    qwen = RealQwenAdapter(model_path=model_path, device=default_device())
     narration = NarrationService(qwen, audio, repo)
     # 모델을 이 프로세스에서 1회 로드한 뒤, 전달받은 segments를 순차 생성한다.
     gen_job = GenerationJob(
@@ -142,7 +141,7 @@ def main(argv: list[str]) -> int:
             _release_gpu()
     except VoiceStudioError as e:
         _write_failure_log(job, e)
-        emit(error_event(e.code, str(e)))
+        emit(error_event(e.code, e.user_message, detail=e.detail))
         return 3
     except Exception as e:
         _write_failure_log(job, e)

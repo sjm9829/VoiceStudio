@@ -114,8 +114,18 @@ class RealQwenAdapter:
     """
 
     def __init__(self, model_path: str | None = None, model_id: str = MODEL_ID,
-                 device: str | None = None, flash_attention: bool = False):
-        """flash_attention=True는 optional 가속 시도. 실패 시 표준 attention으로 fallback한다."""
+                 device: str | None = None, flash_attention: bool = False,
+                 allow_repo_fallback: bool = False):
+        """flash_attention=True는 optional 가속 시도. 실패 시 표준 attention으로 fallback한다.
+
+        P12.3-10: production worker는 model_path만 사용하고 HF repo ID로 자동
+        fallback할 수 없다(허용하려면 allow_repo_fallback=True를 명시: 개발 smoke/
+        tooling 전용). 다운로드는 ModelManager만 담당한다.
+        """
+        if not model_path and not allow_repo_fallback:
+            from ..core.errors import ModelNotDownloadedError
+            raise ModelNotDownloadedError(
+                "RealQwenAdapter requires model_path; set allow_repo_fallback=True only for dev tooling.")
         from qwen_tts import Qwen3TTSModel  # 공식 export
         self.model_id = model_id
         self.model_version = "official-base"
