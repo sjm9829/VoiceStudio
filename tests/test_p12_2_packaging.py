@@ -45,7 +45,10 @@ def test_frozen_ffmpeg_search_covers_internal_bin(monkeypatch):
 def test_spec_bundles_ffmpeg_and_notice():
     spec = (Path(__file__).resolve().parents[1] / "packaging" / "VoiceStudio.spec").read_text(encoding="utf-8")
     assert 'collect_data_files("qwen_tts"' in spec           # P12.2-07
-    assert 'collect_all("ctranslate2")' in spec and 'collect_all("tokenizers")' in spec  # P12.2-08
+    # P12.2-08/P12.3-01: collect_all 계약은 spec_helpers.apply_collect로 검증한다.
+    assert 'spec_helpers.apply_collect' in spec
+    for pkg in ('ctranslate2', 'tokenizers', 'safetensors'):
+        assert f'"{pkg}"' in spec
     assert '"ffmpeg.exe"' in spec and '"ffprobe.exe"' in spec  # P12.2-05
     assert "FFMPEG_NOTICE.txt" in spec                        # P12.2-06
 

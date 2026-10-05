@@ -1,9 +1,9 @@
 """CUDA/PyTorch/모델 런타임 진단(P12.2-13).
 
 빌드 스크립트(build_windows.bat)가 이 스크립트의 실패(exit != 0)로 빌드를 중단한다.
-검사 항목: torch import/CUDA 사용 가능/GPU 이름·CC/torch CUDA 버전/bf16 지원/
-qwen_tts import/Qwen3TTSModel import. 목표 GPU는 RTX 2070 SUPER(Turing, CC 7.5)이며
-기본 dtype은 float16이다.
+검사 항목: torch/torchaudio import/CUDA 사용 가능/GPU 이름·CC/torch CUDA 버전/
+bf16 지원/qwen_tts import/Qwen3TTSModel import/nvidia-smi(P12.3-14).
+목표 GPU는 RTX 2070 SUPER(Turing, CC 7.5)이며 기본 dtype은 float16이다.
 """
 
 import subprocess
@@ -20,6 +20,15 @@ def main() -> int:
     print("torch:", torch.__version__)
     print("torch.version.cuda:", torch.version.cuda)
     print("torch.cuda.is_available():", torch.cuda.is_available())
+    try:
+        import torchaudio  # type: ignore
+        print("torchaudio:", torchaudio.__version__)
+        if torchaudio.__version__.split("+")[0] != torch.__version__.split("+")[0]:
+            print("[FAIL] torch/torchaudio 버전 family 불일치 - CUDA wheel 조합 확인 필요")
+            ok = False
+    except ImportError as e:
+        print(f"[FAIL] torchaudio import: {e}")
+        return 1
     if not torch.cuda.is_available():
         print("[FAIL] CUDA를 사용할 수 없습니다. CUDA wheel과 드라이버를 확인하십시오.")
         return 1

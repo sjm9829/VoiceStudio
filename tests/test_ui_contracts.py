@@ -21,6 +21,8 @@ def stub_context(tmp_path):
     ctx.profile_service = types.SimpleNamespace(list_profiles=lambda: [])
     ctx.audio = None
     ctx.transcriber = None
+    from voice_studio.core.job_coordinator import JobCoordinator
+    ctx.jobs = JobCoordinator()
     return ctx
 
 
