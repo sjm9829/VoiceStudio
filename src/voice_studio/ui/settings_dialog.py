@@ -1,12 +1,33 @@
 """설정 대화상자."""
 
 from __future__ import annotations
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton,
-                               QLineEdit, QFileDialog, QGroupBox, QMessageBox)
+                               QLineEdit, QFileDialog, QGroupBox, QMessageBox, QProgressBar)
+from pathlib import Path
+
 from ..core import config
 from ..services.model_manager import ModelManager
 
 BITRATE_LABELS = {"표준 128": 128, "고음질 192": 192, "최고 256": 256}
+
+class _ModelDownloadThread(QThread):
+    """모델 다운로드를 UI 스레드 밖에서 실행한다(P12.2-14). 수 GB 다운로드 중 창이 멈추지 않게 한다."""
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, model_manager, force=False):
+        super().__init__()
+        self.model_manager = model_manager
+        self.force = force
+
+    def run(self):
+        try:
+            path = self.model_manager.download(force=self.force)
+            self.done.emit(str(path))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
 
 class SettingsDialog(QDialog):
     def __init__(self, context, parent=None):
@@ -29,7 +50,7 @@ class SettingsDialog(QDialog):
         self.quality = QComboBox()
         for label, kbps in BITRATE_LABELS.items():
             self.quality.addItem(label, kbps)
-        self.quality.setCurrentIndex(1)
+        self._select_saved_quality()  # 저장된 음질을 그대로 복원(P12.2-16)
         quality_row.addWidget(self.quality)
         save_layout.addLayout(quality_row)
         layout.addWidget(save_group)
@@ -52,7 +73,12 @@ class SettingsDialog(QDialog):
         dl.clicked.connect(self.download_model)
         redl = QPushButton("모델 다시 받기")
         redl.clicked.connect(lambda: self.download_model(force=True))
+        self.download_buttons = (dl, redl)
         model_layout.addWidget(dl); model_layout.addWidget(redl)
+        self.dl_progress = QProgressBar()
+        self.dl_progress.setVisible(False)
+        self.dl_progress.setRange(0, 0)  # 불확정 진행(정확한 byte progress 미구현)
+        model_layout.addWidget(self.dl_progress)
         layout.addWidget(model_group)
 
         stt_group = QGroupBox("자동 받아쓰기 모델")
@@ -78,14 +104,44 @@ class SettingsDialog(QDialog):
         except FileNotFoundError:
             self.gpu_label.setText("NVIDIA 그래픽 카드를 사용할 수 없습니다. (nvidia-smi 없음)")
 
+    def _select_saved_quality(self):
+        saved = self.context.settings.get("mp3_bitrate_kbps", 192)
+        index = self.quality.findData(int(saved))
+        self.quality.setCurrentIndex(index if index >= 0 else 1)
+
     def download_model(self, force=False):
-        try:
-            path = self.context.model_manager.download(force=force)
-            self.model_label.setText(self.context.model_manager.status_text())
-        except Exception as exc:
-            QMessageBox.warning(self, "모델 받기", str(exc))
+        """모델 다운로드를 별도 스레드로 실행해 UI freeze를 막는다(P12.2-14)."""
+        if getattr(self, "_dl_thread", None) is not None and self._dl_thread.isRunning():
+            return  # 중복 클릭 무시
+        self.dl_progress.setVisible(True)
+        for b in self.download_buttons:
+            b.setEnabled(False)
+        self._dl_thread = _ModelDownloadThread(self.context.model_manager, force=force)
+        self._dl_thread.done.connect(self._on_download_done)
+        self._dl_thread.failed.connect(self._on_download_failed)
+        self._dl_thread.start()
+
+    def _on_download_done(self, path: str):
+        self.dl_progress.setVisible(False)
+        for b in self.download_buttons:
+            b.setEnabled(True)
+        self.model_label.setText(self.context.model_manager.status_text())
+
+    def _on_download_failed(self, message: str):
+        self.dl_progress.setVisible(False)
+        for b in self.download_buttons:
+            b.setEnabled(True)  # 실패 후 UI 복구
+        QMessageBox.warning(self, "모델 받기", message[:300])
 
     def _save_and_close(self):
+        out_dir = self.dir_edit.text().strip()
+        if out_dir:
+            try:
+                Path(out_dir).mkdir(parents=True, exist_ok=True)
+            except OSError:
+                QMessageBox.warning(self, "설정", "저장 폴더를 만들 수 없습니다. 경로를 확인해 주세요.")
+                return
+            self.dir_edit.setText(out_dir)
         self.context.save_settings({
             **self.context.settings,
             "mp3_output_dir": self.dir_edit.text(),

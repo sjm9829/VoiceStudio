@@ -20,6 +20,11 @@ from .services.transcription_service import FasterWhisperTranscriber
 class AppContext:
     """의존성 조립. 무거운 모델 의존성은 worker/서비스 내부에서 지연 import된다."""
 
+    def save_settings(self, data: dict) -> None:
+        """설정을 저장하고 self.settings를 최신 값으로 갱신한다(P12.2-01)."""
+        self.settings_repo.save(data)
+        self.settings = self.settings_repo.load()
+
     def __init__(self):
         self.paths = ensure_app_dirs()
         setup_logging()

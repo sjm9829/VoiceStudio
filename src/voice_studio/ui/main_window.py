@@ -16,7 +16,7 @@ from PySide6.QtCore import Qt, QProcess, QTimer
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
                                QPushButton, QPlainTextEdit, QLabel, QFileDialog, QMessageBox,
                                QProgressBar)
-from ..core.errors import ProfileError, ModelNotDownloadedError
+from ..core.errors import VoiceStudioError, ProfileError, ModelNotDownloadedError
 from ..workers.job_schema import build_narrate_payload
 from ..workers.launcher import worker_command
 from ..workers.linebuffer import JsonlBuffer
@@ -140,10 +140,16 @@ class MainWindow(QMainWindow):
             raise ProfileError("대본을 입력해 주세요.")
         from ..core.paths import default_mp3_dir
         import uuid as uuidlib
-        output_dir = self.context.settings.get("mp3_output_dir", "") or str(default_mp3_dir())
-        output_path = str(Path(output_dir) / f"나레이션_{profile_uuid[:8]}.mp3")
+        output_dir = Path(self.context.settings.get("mp3_output_dir", "") or default_mp3_dir())
+        # 기본/사용자 지정 폴더 모두 생성 시작 전에 확보한다(P12.2-03). 한글 경로 포함.
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # worker 결과는 작업 캐시(jobs/<job_id>/result.mp3)에 두고, MP3 저장 시
+        # 사용자 위치로 복사한다(P12.2-04). 실패/취소 파일이 Music 폴더에 남지 않는다.
+        from ..core.paths import safe_job_cache_dir
+        job_id = str(uuidlib.uuid4())
+        output_path = str(safe_job_cache_dir(job_id) / "result.mp3")
         return build_narrate_payload(
-            job_id=str(uuidlib.uuid4()), profile_uuid=profile_uuid, segments=segments, gap_flags=gap_flags,
+            job_id=job_id, profile_uuid=profile_uuid, segments=segments, gap_flags=gap_flags,
             profile_dir=str(self.context.profile_repository.root), output_path=output_path,
             bitrate_kbps=int(self.context.settings.get("mp3_bitrate_kbps", 192)),
             model_path=self.context.model_manager.model_path())
@@ -230,7 +236,14 @@ class MainWindow(QMainWindow):
         self._worker = None
 
     def _cleanup_job(self, keep_output: bool = False):
-        """작업 종료 후 임시 파일 정리. 최종 MP3는 저장/재생에 필요하므로 남긴다."""
+        """작업 종료 후 임시 파일 정리.
+
+        keep_output=True(성공)일 때는 jobs/<job_id>/result.mp3를 보존한다(P12.2-04):
+        MP3 저장/들어보기가 이 파일을 사용한다. 실패/취소 시 폴더 전체를 삭제한다.
+        """
+        if keep_output and self._job_dir is not None:
+            self._job_dir = None
+            return
         try:
             if self._job_dir is not None and self._job_dir.exists():
                 shutil.rmtree(self._job_dir, ignore_errors=True)
