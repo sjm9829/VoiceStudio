@@ -1,0 +1,15 @@
+FFmpeg redistribution notice (VoiceStudio bundled ffmpeg/ffprobe)
+================================================================
+
+VoiceStudio ships ffmpeg.exe and ffprobe.exe in its install directory
+(bin/). We use a LGPL-licensed FFmpeg build (configured with --enable-lgpl;
+libmp3lame included under LGPL). We do NOT ship a GPL build.
+
+Source code and build configuration for the exact build we ship are
+obtained from the FFmpeg project (https://ffmpeg.org). The FFmpeg source
+is available to you under LGPL-2.1-or-later; you may obtain a copy of the
+license text from the FFmpeg source distribution or https://ffmpeg.org/legal.html.
+
+FFmpeg is a trademark of Fabrice Bellard, originator of the FFmpeg project.
+
+This application is not affiliated with or endorsed by the FFmpeg project.

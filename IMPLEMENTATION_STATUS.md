@@ -104,3 +104,38 @@ P01~P11 소스·테스트 1차 구현 완료. P09~P11 일부(설정 UX/통합/�
 ### 테스트(정확한 숫자)
 - `uv run pytest` (LD_LIBRARY_PATH에 로컬 libGL, offscreen): **84 passed, 5 skipped** (ffmpeg 실기 5 + GPU opt-in skip).
 - 이 환경 한정: pytest-qt UI 실행 테스트가 libGL 없이는 불가했으나 로컬 libGL 경로로 해소.
+
+## P12.2 Pre-Windows Validation (2026-10-06, 코드 레벨 완료 / 실기 미검증)
+
+### 코드 레벨 완료(테스트로 검증)
+- P12.2-01 AppContext.save_settings 복구(저장 후 context.settings 갱신).
+- P12.2-02 MainWindow VoiceStudioError import 수정(모델 없음 → 사용자 안내, NameError 없음).
+- P12.2-03 기본/사용자 지정 MP3 출력 폴더 저장·job build 시점 자동 생성(한글 경로 포함).
+- P12.2-04 worker 결과를 jobs/<job_id>/result.mp3 캐시에 저장, 성공 시 결과 보존/실패·취소 시 폴더 정리.
+- P12.2-05 frozen ffmpeg 탐색이 exe 옆 bin/과 _internal/bin/ 모두를 커버. spec이 ffmpeg.exe/ffprobe.exe를 bin/에 번들.
+- P12.2-06 FFmpeg 배포 라이선스 결정: LGPL 빌드 배포, third_party/FFMPEG_NOTICE.txt 고지 + spec 번들.
+- P12.2-07/08 spec: qwen_tts collect_data_files + ctranslate2/tokenizers/safetensors collect_all 보강.
+- P12.2-09/10 dtype 객체 전달 + capability guard: RTX 2070 SUPER(Turing) 기본 torch.float16, bf16 지원 GPU만 bfloat16, CPU 강제 없음.
+- P12.2-11 flash-attention 실패 시 표준 attention 1회 fallback(목표 PC 기본 OFF).
+- P12.2-12/13 build_windows.bat CUDA_TAG 파라미터화, qwen-tts 설치 전후 torch 버전 기록, pip check, check_cuda 실패 시 빌드 중단 + qwen_tts import 검증.
+- P12.2-14 모델 다운로드 별도 스레드(QThread)로 UI freeze 방지.
+- P12.2-16 설정 다이얼로그가 저장된 bitrate를 복원.
+- P12.2-17 worker result 이벤트에 result_type(audio/profile) 명시, register/narrate의 output_path 혼용 제거.
+- P12.2-18 worker 성공/실패 무관 GPU cleanup을 finally로 보장.
+- P12.2-21 VoiceStudio.exe --smoke-test 내부 모드 + scripts/smoke_frozen.bat(결과는 logs/smoke-test.log).
+- P12.2-22 설정 화면 Self-Diagnosis 요약 + 상세는 logs/diagnosis.log(메인 프로세스 heavy import 회피, subprocess 방식).
+- P12.2-23 worker 실패 진단을 logs/worker-failure.log에 기록(UI traceback 노출 금지).
+- P12.2-24 REQUIRED_MODEL_FILES를 공식 HF repo 트리와 대조 검증(네트워크 가능 시, 테스트로 강제).
+- P12.2-25 다운로드 atomicity: 부분 상태는 complete로 보지 않고, force 실패 시 기존 .complete 모델 보존(테스트).
+- P12.2-26 production worker model_path 필수(E_MODEL_NOT_DOWNLOADED, HF 자동 다운로드 금지).
+- P12.2-20 실제 사용자 경로 regression 5종(A 설정 round-trip, B 모델 없음 생성, C output dir 자동 생성, D FFmpeg 없음 안내, E 설정 재실행).
+- P12.2-27 Python 3.12 호환성: PyPI cp312/universal wheel 확인 완료 → 3.12 유지(docs/07 기록).
+
+### 실기 미검증(Windows + RTX 2070 SUPER 필요)
+- frozen PyInstaller 빌드/Inno 설치 자체, bundled ffmpeg 실기 탐색.
+- FP16 실제 생성 품질·속도, worker 종료 후 nvidia-smi VRAM 반환.
+- P12.2-19 취소 후 ffmpeg 자식 프로세스 잔존 여부(terminate→kill fallback 존재, 실기 확인 필요).
+- 모델 다운로드 실패 재시도 UX, 실제 HF 다운로드.
+
+### 테스트
+- non-GPU 전체: 106 passed / 6 skipped / 0 failed (P12.1 기준 85+5에서 증가).
