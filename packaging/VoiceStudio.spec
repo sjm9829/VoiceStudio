@@ -16,10 +16,18 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 block_cipher = None
-# P12.3-02: 실제 PyInstaller 규칙상 SPECPATH는 spec 파일이 있는 packaging/ 디렉터리이므로
-# repository root는 그 부모다. 계약은 packaging/spec_helpers.compute_repo_root와
+# P12.3-02 + Final Hotfix 2: 실제 PyInstaller 규칙상 SPECPATH는 spec 파일이 있는
+# packaging/ 디렉터리이므로 repository root는 그 부모다. 또한 PyInstaller가 spec
+# 파일의 디렉터리를 항상 module import path에 넣는다고 가정할 수 없으므로,
+# spec_helpers import 전에 packaging/ 를 sys.path 에 명시적으로 추가한다.
+# 계약은 packaging/spec_helpers.compute_repo_root와
 # tests/test_p12_3_packaging.py 로 검증한다.
-ROOT = Path(SPECPATH).resolve().parent
+SPEC_DIR = Path(SPECPATH).resolve()
+ROOT = SPEC_DIR.parent
+if str(SPEC_DIR) not in sys.path:
+    sys.path.insert(0, str(SPEC_DIR))
+
+import spec_helpers  # noqa: E402
 
 # ---- Analysis 생성 전에 수집값을 전부 준비한다(Final Hotfix) ----
 datas = [
@@ -55,7 +63,6 @@ datas += collect_data_files("huggingface_hub")
 
 # 의존성의 data/DLL 보강(P12.2-08/P12.3-01): ctranslate2/tokenizers/safetensors의
 # 동적 라이브러리와 데이터 파일을 올바른 매핑으로 수집한다.
-import spec_helpers
 for _pkg in ("ctranslate2", "tokenizers", "safetensors"):
     spec_helpers.merge_collect(_pkg, datas, binaries, hiddenimports)
 

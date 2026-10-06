@@ -151,6 +151,12 @@ P01~P11 소스·테스트 1차 구현 완료. P09~P11 일부(설정 UX/통합/�
 - `check_ffmpeg.py`: GPL 구성 발견 시 WARN 대신 FAIL(exit 1). `ffmpeg -buildconf` 실행 출력을 license 근거 로그에 추가.
 - 테스트: 148 passed / 6 skipped / 0 failed (hotfix 신규 regression 12개 포함).
 
+### Final Hotfix 2
+- PyInstaller spec helper import path 명시: `VoiceStudio.spec`은 `SPEC_DIR = Path(SPECPATH).resolve()`로 packaging/ 디렉터리를 계산하고, `import spec_helpers` 전에 `sys.path.insert(0, str(SPEC_DIR))`로 명시 추가한다(PyInstaller가 spec 디렉터리를 항상 import path에 넣는다고 가정하지 않음). ROOT는 `SPEC_DIR.parent`로 repository root를 가리키며 기존 SPECPATH 계약과 통합됨.
+- import 경로 regression: `test_spec_adds_spec_dir_to_sys_path_before_helper_import`(insert가 import보다 먼저, SPEC_DIR=packaging/, ROOT=repository root)과 `test_spec_evaluation_imports_spec_helpers_smoke`(PyInstaller hooks/Analysis 가짜로 spec 전체 평가, spec_helpers import 성공 확인) 추가.
+- 테스트: 150 passed / 6 skipped / 0 failed.
+- 결과: **P12.3 Final Packaging Blockers — COMPLETE, READY FOR P13 WINDOWS GPU E2E**. 다음 단계는 실제 RTX 2070 SUPER Windows PC에서 FFmpeg 준비 → build_windows.bat → PyInstaller → frozen smoke → Inno Setup → 설치 → Qwen 모델 다운로드 → 목소리 등록 → FP16 실제 생성 → MP3 생성 → VRAM 반환 확인.
+
 ## P12.3 Final Packaging Blockers
 
 ### 코드 수준 완료
