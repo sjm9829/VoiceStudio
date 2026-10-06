@@ -16,7 +16,8 @@ GPU_OPTIONAL_CHECKS = ("CUDA available", "GPU")
 def heavy_checks(checks: list, require_gpu: bool = False) -> None:
     """checks 리스트에 (name, ok, detail)을 추가한다. 예외로 실패를 기록한다.
 
-    require_gpu=False: CUDA available/GPU는 unavailable이면 SKIP(ok=True, detail=SKIP)으로 기록.
+    require_gpu=False: CUDA available/GPU는 unavailable이면 SKIP(ok=False, detail=SKIP)으로 기록해
+    main의 개발환경 SKIP 경로(okflag=False, frozen/require_gpu 아님)로 카운트된다.
     require_gpu=True: CUDA/GPU 실패는 fatal(ok=False).
     """
 
@@ -26,7 +27,7 @@ def heavy_checks(checks: list, require_gpu: bool = False) -> None:
             checks.append((name, True, ""))
         except Exception as e:
             if name in GPU_OPTIONAL_CHECKS and not require_gpu:
-                checks.append((name, True, f"SKIP ({type(e).__name__}: {e})"))
+                checks.append((name, False, f"SKIP ({type(e).__name__}: {e})"))
             else:
                 checks.append((name, False, f"{type(e).__name__}: {e}"))
 

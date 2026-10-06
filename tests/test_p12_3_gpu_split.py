@@ -57,14 +57,17 @@ def _smoke_log(tmp_path):
     return (tmp_path / "logs" / "smoke-test.log").read_text(encoding="utf-8")
 
 
-def test_default_smoke_succeeds_without_gpu(tmp_path, monkeypatch):
+def test_default_smoke_succeeds_without_gpu(tmp_path, monkeypatch, capsys):
     _install_fake_gpu_stack(monkeypatch, cuda_available=False)
     code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test"])
     assert code == 0
     log = _smoke_log(tmp_path)
+    out = capsys.readouterr().out
     assert "SMOKE_OK" in log
     # CUDA/GPU 2개 항목이 GPU 없이 SKIP 처리되어 성공이다(FAIL 아님).
-    assert "skipped=2" in log
+    assert "CUDA available: SKIP" in out
+    assert "GPU: SKIP" in out
+    assert ": FAIL" not in out
 
 
 def test_default_smoke_fails_on_torch_import_error(tmp_path, monkeypatch):

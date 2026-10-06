@@ -304,6 +304,24 @@ NVIDIA GPU가 없는 Windows 빌드 PC에서도 패키징이 성공하도록 bui
   받아쓰기 안내 3분류. 실제 ffmpeg 환경 integration은 75~87초 → 약 12초 출력 검증
   (ffmpeg 미설치 환경에서는 skip).
 
+### Hotfix 후속 정정(동일 커밋 범위, 2026-10-06)
+
+- 전체 스위트 재검증 중 발견한 계약 불일치 2건 정정:
+  1. `src/voice_studio/heavy_smoke.py`: CUDA/GPU optional 실패를
+     `checks.append((name, True, "SKIP (...)"))`(ok=True)로 기록해 `main.run_smoke_test`의
+     개발환경 SKIP 경로(okflag=False)가 카운트되지 않고 `skipped=2` 계약이 깨져 있었다.
+     ok=False로 정정해 dev에서는 `SKIP (dev)`로 카운트, frozen/require-gpu에서는 기존과
+     같이 FAIL로 처리된다(이름·detail 그대로 유지).
+  2. `tests/test_p12_2_user_paths.py::test_d_ffmpeg_missing_gives_user_error`는 개발 머신
+     PATH에 ffmpeg가 있으면 통과할 수 없는 환경 의존 테스트였다. `shutil.which` 차단 +
+     `bundled_bin_dirs` 비움(monkeypatch)으로 환경 독립화했다.
+  3. `tests/test_p12_3_gpu_split.py::test_default_smoke_succeeds_without_gpu`의
+     `skipped=2` 개수 고정 계약은 ffmpeg 유무에 따라 2/4로 변하므로, SKIP 카운트 대신
+     `CUDA available: SKIP` / `GPU: SKIP` / FAIL 부재를 stdout으로 검증하도록 정정했다.
+- 정정 후 전체 스위트 두 조건 모두 통과:
+  - ffmpeg PATH 포함: 229 passed / 2 skipped / 0 failed(실제 ffmpeg integration 실행).
+  - ffmpeg PATH 미포함: 221 passed / 10 skipped / 0 failed.
+
 아직 미완료(실기 대기, P13 진행 중):
 
 - 수정 installer 재빌드(`scripts\build_windows.bat` → `scripts\make_installer.bat`)·재설치
@@ -368,6 +386,24 @@ NVIDIA GPU가 없는 Windows 빌드 PC에서도 패키징이 성공하도록 bui
   221 passed / 10 skipped / 0 failed (기존 195 passed에서 신규 29개 증가, ffmpeg integration skip).
 - 실제 FFmpeg 7.0.2 연동 확인: `tests/test_ffmpeg_real.py` + `tests/test_p13_waveform_hotfix.py`
   = 33 passed / 0 failed (probe duration≈20s, waveform bucket 64/128, AAC M4A 한글 경로 포함).
+
+### Hotfix 후속 정정(동일 커밋 범위, 2026-10-06)
+
+- 전체 스위트 재검증 중 발견한 계약 불일치 2건 정정:
+  1. `src/voice_studio/heavy_smoke.py`: CUDA/GPU optional 실패를
+     `checks.append((name, True, "SKIP (...)"))`(ok=True)로 기록해 `main.run_smoke_test`의
+     개발환경 SKIP 경로(okflag=False)가 카운트되지 않고 `skipped=2` 계약이 깨져 있었다.
+     ok=False로 정정해 dev에서는 `SKIP (dev)`로 카운트, frozen/require-gpu에서는 기존과
+     같이 FAIL로 처리된다(이름·detail 그대로 유지).
+  2. `tests/test_p12_2_user_paths.py::test_d_ffmpeg_missing_gives_user_error`는 개발 머신
+     PATH에 ffmpeg가 있으면 통과할 수 없는 환경 의존 테스트였다. `shutil.which` 차단 +
+     `bundled_bin_dirs` 비움(monkeypatch)으로 환경 독립화했다.
+  3. `tests/test_p12_3_gpu_split.py::test_default_smoke_succeeds_without_gpu`의
+     `skipped=2` 개수 고정 계약은 ffmpeg 유무에 따라 2/4로 변하므로, SKIP 카운트 대신
+     `CUDA available: SKIP` / `GPU: SKIP` / FAIL 부재를 stdout으로 검증하도록 정정했다.
+- 정정 후 전체 스위트 두 조건 모두 통과:
+  - ffmpeg PATH 포함: 229 passed / 2 skipped / 0 failed(실제 ffmpeg integration 실행).
+  - ffmpeg PATH 미포함: 221 passed / 10 skipped / 0 failed.
 
 아직 미완료(실기 대기, P13 진행 중):
 

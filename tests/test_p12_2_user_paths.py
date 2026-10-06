@@ -92,11 +92,15 @@ def test_c_output_dir_auto_created(make_context, tmp_path):
 
 
 # ── D. FFmpeg 없음 → 사용자 안내, traceback 없음 ─────────────────────
-def test_d_ffmpeg_missing_gives_user_error(qapp, make_context, tmp_path):
+def test_d_ffmpeg_missing_gives_user_error(qapp, make_context, tmp_path, monkeypatch):
     from voice_studio.core.errors import VoiceStudioError
+    from voice_studio.infra import ffmpeg_adapter as fa
     from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter
+    # PATH에 ffmpeg가 설치된 개발 머신에서도 동일하게 검증되도록 탐색을 차단한다.
+    monkeypatch.setattr(fa.shutil, "which", lambda name: None)
+    monkeypatch.setattr(fa, "bundled_bin_dirs", lambda: [])
     with pytest.raises(VoiceStudioError):
-        RealFfmpegAdapter(ffmpeg=None, ffprobe=None)  # PATH에 ffmpeg 없는 환경
+        RealFfmpegAdapter(ffmpeg=None, ffprobe=None)
 
 
 # ── E. 설정 재실행 → 동일 값 로드 ─────────────────────────────────────
