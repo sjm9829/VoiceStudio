@@ -81,6 +81,12 @@ def run_smoke_test(argv: list[str] | None = None) -> int:
     for name, okflag, detail in checks:
         if okflag:
             print(f"{name}: OK")
+        elif detail.startswith("SKIP") and not require_gpu:
+            # P13 waveform hotfix 후속: heavy_smoke는 GPU/CUDA를 optional SKIP으로 표시한다.
+            # frozen 빌드 PC에 GPU가 없어도 기본 smoke는 packaging integrity 검사이므로
+            # SKIP이며 실패가 아니다(--require-gpu일 때만 fatal).
+            print(f"{name}: SKIP (frozen) {detail}")
+            skipped.append(name)
         elif frozen or require_gpu:
             print(f"{name}: FAIL {detail}")
             failed.append(f"{name}: {detail}")

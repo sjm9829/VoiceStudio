@@ -108,7 +108,7 @@ def transcribe_failure_message(exc: Exception) -> str:
 class _PreviewThread(QThread):
     """선택 구간만 임시 WAV로 만들어 실제로 들어볼 수 있게 준비한다."""
     ready = Signal(str)
-    failed = Signal(str)
+    failed = Signal(object)  # 실패 원인 예외 객체(_TranscribeThread와 동일 계약)
 
     def __init__(self, audio, path, start_s, end_s):
         super().__init__()

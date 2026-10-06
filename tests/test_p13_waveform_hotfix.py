@@ -445,3 +445,37 @@ def test_real_probe_and_waveform_m4a_korean_path(sine20, tmp_path):
     assert abs(info["duration"] - 20.0) < 0.5
     buckets = adapter.waveform(str(m4a), 64)
     assert len(buckets) == 64 and max(buckets) > 0.01
+
+def test_preview_failed_signal_carries_exception_object(qtbot, stub_context, monkeypatch,
+                                                        ui_messages):
+    """_PreviewThread.failed는 예외 객체(object)를 전달해야 한다(P13 후속 회귀).
+
+    Signal(str)로 두고 emit(exc)를 하면 Qt에서 TypeError/무시가 발생해
+    사용자 friendly message path까지 끊긴다.
+    """
+    from voice_studio.core.errors import UnsupportedAudioError
+    from voice_studio.ui.voice_editor_dialog import _PreviewThread
+
+    class FailingAudio:
+        def decode_preview_segment(self, path, start_s, end_s):
+            raise UnsupportedAudioError(f"unsupported suffix: {path}")
+        def encode_wav(self, pcm, path):
+            raise AssertionError("encode_wav must not run")
+
+    stub_context.audio = FailingAudio()
+    received = []
+    thread = _PreviewThread(stub_context.audio, "dummy.m4a", 0.0, 5.0)
+    thread.failed.connect(lambda exc: received.append(exc))
+    with qtbot.waitSignal(thread.failed, timeout=5000):
+        thread.start()
+    assert len(received) == 1
+    assert isinstance(received[0], UnsupportedAudioError)
+    assert "unsupported suffix" in str(received[0])
+    # friendly message path도 연결 가능해야 한다.
+    dlg_warnings = ui_messages["warning"]
+    from voice_studio.ui.voice_editor_dialog import VoiceEditorDialog
+    dlg = VoiceEditorDialog(stub_context)
+    dlg._preview_thread = thread
+    dlg._on_preview_failed(received[0])
+    assert dlg_warnings and "선택한 음성 구간을 재생할 수 없습니다" in dlg_warnings[-1]
+

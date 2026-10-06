@@ -90,6 +90,37 @@ def test_default_smoke_fails_on_torch_import_error(tmp_path, monkeypatch):
     assert "Torch import" in log
 
 
+def test_default_frozen_smoke_succeeds_without_gpu(tmp_path, monkeypatch, capsys):
+    """sys.frozen=True + GPU 없음 + 기본 smoke는 SKIP 2개로 성공이어야 한다(P13 후속 회귀).
+
+    기존 test_default_smoke_succeeds_without_gpu는 frozen을 모사하지 않아
+    frozen에서 okflag=False가 FAIL로 분류되는 회귀를 놓쳤다.
+    """
+    import sys as _sys
+    monkeypatch.setattr(_sys, "frozen", True, raising=False)
+    _fake_ffmpeg(monkeypatch)
+    _install_fake_gpu_stack(monkeypatch, cuda_available=False)
+    code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test"])
+    assert code == 0
+    log = _smoke_log(tmp_path)
+    out = capsys.readouterr().out
+    assert "SMOKE_OK" in log
+    assert "CUDA available: SKIP (frozen)" in out
+    assert "GPU: SKIP (frozen)" in out
+    assert ": FAIL" not in out
+
+
+def test_frozen_smoke_require_gpu_still_fails_without_gpu(tmp_path, monkeypatch, capsys):
+    """frozen + --require-gpu + GPU 없음은 여전히 FAIL(exit 1)이어야 한다."""
+    import sys as _sys
+    monkeypatch.setattr(_sys, "frozen", True, raising=False)
+    _fake_ffmpeg(monkeypatch)
+    _install_fake_gpu_stack(monkeypatch, cuda_available=False)
+    code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test", "--require-gpu"])
+    assert code == 1
+    assert "SMOKE_FAILED" in _smoke_log(tmp_path)
+
+
 def test_require_gpu_fails_when_cuda_unavailable(tmp_path, monkeypatch):
     _install_fake_gpu_stack(monkeypatch, cuda_available=False)
     code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test", "--require-gpu"])
