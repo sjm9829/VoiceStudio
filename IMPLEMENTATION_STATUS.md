@@ -204,6 +204,31 @@ torch >= 2.11 이상(future release 포함)과 동작하므로 exact equality �
 - qwen-tts 설치 전후 조합은 실제 로그에서 동일하므로 build_windows.bat의
   설치 버전 pin은 변경하지 않음.
 
+### P12.3 Final Hotfix 4: make_installer.bat ISCC portability (2026-10-06, 실제 Windows installer build finding)
+
+실제 Windows에서 build_windows.bat가 성공(BUILD_OK dist\VoiceStudio)했지만
+make_installer.bat가 `'iscc'은(는) 내부 또는 외부 명령...`으로 실패했다.
+Inno Setup 6이 설치되어 있었으나 ISCC.exe가 PATH에 등록되지 않은 환경이었고,
+기존 스크립트는 단순 `iscc` PATH 호출만 사용했다.
+
+- `scripts/make_installer.bat`: ISCC 탐색 우선순위를
+  PATH(`where iscc`) → `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`
+  → `%ProgramFiles%\Inno Setup 6\ISCC.exe` → `%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe`
+  순으로 개선. 미발견 시 명확한 `[FAIL]` + non-zero exit.
+- 사용 경로 출력(`Using Inno Setup compiler:`), quoted path 실행
+  (Program Files 공백 대응), `INSTALLER_OK installer\Output` 성공 마커 유지.
+- `dist\VoiceStudio` prerequisite 정책 유지, ASCII-only 유지,
+  사용자 이름 하드코딩 경로 금지.
+- `tests/test_p12_3_installer_iscc.py` 신규 regression 9개
+  (dist prerequisite, PATH 우선, fallback 3경로, 미발견 non-zero,
+  quoted 실행, 실패 non-zero, 성공 마커, 하드코딩 경로 금지, ASCII-only).
+- 아직 미완료(실기 대기): installer 생성 확인, 설치, 설치본 실행, 모델 다운로드,
+  voice registration, 실제 TTS 생성, RTX 2070 SUPER P13, VRAM A~H.
+  이 hotfix만으로 P13 COMPLETE로 표시하지 않음.
+
+### 테스트
+- `uv run pytest`: 170 passed / 6 skipped / 0 failed에서 신규 9개 증가.
+
 Build/GPU Validation 역할 분리 (2026-10-06, 코드 레벨 완료)
 
 ### 목적
