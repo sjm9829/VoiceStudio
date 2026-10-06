@@ -10,6 +10,17 @@
 - `scripts/make_installer.bat`: Inno Setup(iscc) 실행
 - `scripts/check_cuda.py`: CUDA/그래픽 카드 진단(개발 모드)
 
+## Build 머신과 런타임의 GPU 요구사항(역할 분리)
+
+- Build machine: NVIDIA GPU not required. `scripts\build_windows.bat`는
+  `scripts\check_runtime_packages.py`(패키지 무결성만 검사)를 사용하며
+  CUDA wheel 설치와 패키징은 GPU 없이 가능하다.
+- Runtime inference: NVIDIA CUDA GPU required. 앱은 여전히 CUDA GPU 없이 TTS 실행을
+  지원하지 않는다(CPU fallback 없음).
+- P13 validation target: RTX 2070 SUPER 8GB (Turing, CC 7.5, dtype float16,
+  FlashAttention-2 OFF). 실기 검증은 `scripts\validate_gpu_windows.bat` 또는
+  `dist\VoiceStudio\VoiceStudio.exe --smoke-test --require-gpu`로 수행한다.
+
 ## 라이선스/고지
 - `third_party/LICENSES.md`: FFmpeg(libmp3lame 포함), PySide6, faster-whisper, PyInstaller 등
 - `third_party/MODEL_NOTICE.md`: Qwen 모델 Apache-2.0 + Qwen 고지

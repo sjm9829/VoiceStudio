@@ -188,3 +188,35 @@ P01~P11 소스·테스트 1차 구현 완료. P09~P11 일부(설정 UX/통합/�
 
 READY FOR P13 WINDOWS GPU E2E (코드 검토 레벨 blocker는 모두 처리, 남은 항목은 위 실기 대기 목록)
 
+## Build/GPU Validation 역할 분리 (2026-10-06, 코드 레벨 완료)
+
+### 목적
+NVIDIA GPU가 없는 Windows 빌드 PC에서도 패키징이 성공하도록 build와 GPU validation을 분리.
+실제 CUDA/GPU 검증은 P13 대상 PC(RTX 2070 SUPER 8GB)에서만 수행.
+
+### 변경
+- `scripts/check_runtime_packages.py` 신규: 빌드 PC용 패키지 무결성 검사
+  (torch/torchaudio import, torch.version.cuda 존재, 버전 family 일치,
+  qwen_tts/Qwen3TTSModel import). `torch.cuda.is_available()` / nvidia-smi는 검사하지 않음.
+- `scripts/build_windows.bat`: `check_cuda.py` 필수 단계를 제거하고
+  `check_runtime_packages.py`로 교체. GPU 없는 빌드 PC에서도 BUILD_OK 가능.
+- `src/voice_studio/heavy_smoke.py`: `heavy_checks(checks, require_gpu=False)`로 변경.
+  기본 smoke에서 CUDA available/GPU는 optional(SKIP), require_gpu=True에서만 fatal.
+- `src/voice_studio/main.py`: `--smoke-test --require-gpu` strict 모드 추가.
+  기본 smoke는 GPU optional(SKIP), require-gpu에서는 CUDA/GPU/dtype 실패가 FAIL이고
+  dev SKIP 변환도 적용되지 않는다.
+- `scripts/validate_gpu_windows.bat` 신규: P13 실기 GPU validation 스크립트
+  (`check_cuda.py` + frozen `--smoke-test --require-gpu`).
+- `scripts/check_cuda.py`: P13 실기 GPU validation 전용으로 역할 확정 (코드 변경 없음).
+
+### 정책(변경 없음)
+- 일반 앱 실행은 여전히 NVIDIA CUDA GPU 필수. CPU inference fallback 없음.
+- dtype 정책: RTX 2070 SUPER(Turing, CC 7.5) → float16, FlashAttention-2 OFF 유지.
+
+### 테스트
+- `uv run pytest`: 158 passed / 6 skipped / 0 failed.
+- 신규 regression: tests/test_p12_3_gpu_split.py 8개
+  (GPU 없는 기본 smoke 성공, frozen에서 torch/qwen import 실패 시 기본 smoke 실패,
+  --require-gpu + CUDA unavailable 실패/available 성공,
+  build_windows.bat check_cuda 미호출·check_runtime_packages 호출,
+  check_runtime_packages GPU 검사 부재, validate_gpu_windows.bat 계약, require_gpu 시그니처).

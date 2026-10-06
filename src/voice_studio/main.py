@@ -15,14 +15,15 @@ def _run_worker(argv: list[str]) -> int:
     return worker_main(argv)
 
 
-def run_smoke_test() -> int:
-    """frozen 빌드 셀프 스모크(P12.2-21, P12.3-17).
+def run_smoke_test(argv: list[str] | None = None) -> int:
+    """frozen 빌드 셀프 스모크(P12.2-21, P12.3-17, GPU/빌드 역할 분리).
 
-    --smoke-test는 별도 진단 모드이므로 heavy import를 허용한다. 일반 GUI 시작은
-    일반 GUI 시작의 heavy 의존성 0건 계약은 test_startup_smoke가 유지한다.
+    기본 --smoke-test는 패키징 무결성 검사이므로 GPU/CUDA는 optional(SKIP)이다.
+    --require-gpu를 함께 주면 P13 strict 모드로 CUDA/GPU/dtype 정책 실패가 FAIL이다.
     모델 weight 로드나 GPU 생성은 수행하지 않는다.
     """
     checks: list[tuple[str, bool, str]] = []
+    require_gpu = "--require-gpu" in (argv if argv is not None else sys.argv)
 
     def _check(name: str):
         def deco(fn):
@@ -61,13 +62,10 @@ def run_smoke_test() -> int:
         adapter = RealFfmpegAdapter()
         assert adapter.ffprobe
 
-    def _heavy():
-        from voice_studio.heavy_smoke import heavy_checks
-        heavy_checks(checks)
-
     @_check("heavy runtime imports")
     def _heavy_check():
-        _heavy()
+        from voice_studio.heavy_smoke import heavy_checks
+        heavy_checks(checks, require_gpu=require_gpu)
 
     @_check("AppContext")
     def _ctx():
@@ -83,12 +81,12 @@ def run_smoke_test() -> int:
     for name, okflag, detail in checks:
         if okflag:
             print(f"{name}: OK")
-        elif frozen:
+        elif frozen or require_gpu:
             print(f"{name}: FAIL {detail}")
             failed.append(f"{name}: {detail}")
         else:
             # 개발 환경(Repository run)에서는 heavy 의존성(GPU 런타임/ffmpeg.exe)
-            # 미설치가 정상이므로 SKIP으로 기록한다. frozen 빌드에서는 FAIL이다.
+            # 미설치가 정상이므로 SKIP으로 기록한다. frozen 빌드와 --require-gpu에서는 FAIL이다.
             print(f"{name}: SKIP (dev) {detail}")
             skipped.append(name)
     if failed:
@@ -112,7 +110,7 @@ def _finish_smoke(logs_path, status: str, detail: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv if argv is None else argv)
     if "--smoke-test" in args:
-        return run_smoke_test()
+        return run_smoke_test(args)
     if "--diagnostics" in args:  # P12.3-06: frozen에서는 exe 진입점으로 진단 실행
         from voice_studio.diagnostics import main as diagnostics_main
         return diagnostics_main(args)

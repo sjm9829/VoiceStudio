@@ -46,13 +46,14 @@ type build_torch_version.txt
 REM pip 의존성 무결성 확인(qwen-tts가 torch/transformers를 충돌 버전으로 격상/강등하지 않았는지)
 python -m pip check || goto :err
 
-REM CUDA/모델 런타임 진단: 실패 시 빌드를 중단한다(P12.2-13).
-python scripts\check_cuda.py || goto :err
+REM 런타임 패키지 무결성 검사(GPU/빌드 역할 분리): 빌드 머신에 GPU가 없어도 된다.
+REM 실제 CUDA/GPU 검증은 P13 대상 PC의 scripts\check_cuda.py와 --require-gpu 스모크에서 수행.
+python scripts\check_runtime_packages.py || goto :err
 
 pip install pyinstaller || goto :err
 pyinstaller --noconfirm --clean packaging\VoiceStudio.spec || goto :err
 
-REM frozen 스모크: heavy import/FFmpeg/CUDA/dtype까지 확인(P12.2-21/P12.3-17)
+REM frozen 스모크: CPU-safe(패키징 무결성). CUDA unavailable은 SKIP이며 실패가 아니다.
 dist\VoiceStudio\VoiceStudio.exe --smoke-test || goto :err
 REM 빌드 결과물의 FFmpeg 실제 포함 검증(P12.3-05)
 python scripts\check_dist.py || goto :err

@@ -57,7 +57,9 @@ def test_build_script_cuda_tag_parameterized():
     """P12.2-12: CUDA_TAG 환경변수로 조합 교체 가능 + 실패 시 빌드 중단."""
     bat = (Path(__file__).resolve().parents[1] / "scripts" / "build_windows.bat").read_text(encoding="utf-8")
     assert "CUDA_TAG" in bat
-    assert "check_cuda.py || goto :err" in bat
+    # GPU/빌드 역할 분리: 빌드는 check_cuda.py를 필수 호출하지 않고 GPU 없어도 성공한다.
+    assert "python scripts\\check_cuda.py" not in bat
+    assert "check_runtime_packages.py || goto :err" in bat
     assert "=== BEFORE QWEN-TTS ===" in bat and "=== AFTER QWEN-TTS ===" in bat
     assert "pip check" in bat
 
