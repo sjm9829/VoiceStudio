@@ -43,10 +43,16 @@ def main() -> int:
     print("=== ffmpeg -version ===")
     print(version)
     config_line = next((l for l in version.splitlines() if l.strip().startswith("configuration:")), "")
+    # P12.3 Final Hotfix: 배포 정책은 GPL build 미배포이므로 GPL 구성은 빌드를 차단한다.
     if "--enable-gpl" in config_line:
-        print("[WARN] GPL 구성 binary입니다. 배포 license 문서를 GPL 기준으로 재작성해야 합니다.")
-    else:
-        print("[INFO] GPL 플래그 없음(LGPL 계열로 보임). buildconf를 근거로 고지를 확정할 것.")
+        print("[FAIL] GPL-enabled FFmpeg build는 현재 배포 정책에서 허용하지 않습니다.")
+        return 1
+    print("[INFO] GPL 플래그 없음(LGPL 계열로 보임). buildconf를 근거로 고지를 확정할 것.")
+
+    # P12.3 Final Hotfix: -version configuration뿐 아니라 실제 -buildconf도 실행해 기록한다.
+    buildconf = _run(exe, "-buildconf")
+    print("=== ffmpeg -buildconf ===")
+    print(buildconf)
 
     encoders = _run(exe, "-hide_banner", "-encoders")
     if "libmp3lame" in encoders:

@@ -36,12 +36,11 @@ REM 기록해 qwen-tts가 CUDA wheel을 교체/강등하는지 확인한다(P12.
 REM P12.3-11: torch와 torchaudio를 동일 CUDA wheel index에서 함께 설치해
 REM qwen-tts가 torchaudio를 CPU wheel로 강등/격상하지 않도록 먼저 고정한다.
 python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/%CUDA_TAG% || goto :err
-echo TORCH_BEFORE_QWEN_TTS > build_torch_version.txt
+REM P12.3 Final Hotfix: before/after 값을 라벨과 함께 실제로 기록해 사람이 읽어도 정확하게 한다.
+echo === BEFORE QWEN-TTS === > build_torch_version.txt
 python -c "import torch, torchaudio; print('torch', torch.__version__); print('torchaudio', torchaudio.__version__); print('cuda', torch.version.cuda)" >> build_torch_version.txt || goto :err
 pip install qwen-tts || goto :err
-echo TORCH_AFTER_QWEN_TTS >> build_torch_version.txt
-echo TORCHAUDIO_BEFORE_QWEN_TTS >> build_torch_version.txt
-echo TORCHAUDIO_AFTER_QWEN_TTS >> build_torch_version.txt
+echo === AFTER QWEN-TTS === >> build_torch_version.txt
 python -c "import torch, torchaudio; print('torch', torch.__version__); print('torchaudio', torchaudio.__version__); print('cuda', torch.version.cuda); assert torch.version.cuda is not None" >> build_torch_version.txt || goto :err
 type build_torch_version.txt
 REM pip 의존성 무결성 확인(qwen-tts가 torch/transformers를 충돌 버전으로 격상/강등하지 않았는지)

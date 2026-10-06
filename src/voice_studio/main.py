@@ -45,15 +45,21 @@ def run_smoke_test() -> int:
     def _diag_dispatch():
         from voice_studio.workers.launcher import diagnostics_command  # noqa: F401
 
+    # P12.3 Final Hotfix: _resolve_binary는 모듈 함수이지 instance method가 아니므로
+    # 어댑터 인스턴스에 그 이름을 호출하면 frozen에서 AttributeError로 실패했다.
+    # 어댑터 인스턴스의 ffmpeg/ffprobe 속성으로 검사하고, 실제 binary 실행 가능 여부까지 확인한다.
     @_check("FFmpeg")
     def _ffmpeg():
         from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter
-        RealFfmpegAdapter()
+        adapter = RealFfmpegAdapter()
+        assert adapter.ffmpeg
+        adapter.probe_version()
 
     @_check("FFprobe")
     def _ffprobe():
         from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter
-        RealFfmpegAdapter()._resolve_binary("ffprobe", None)
+        adapter = RealFfmpegAdapter()
+        assert adapter.ffprobe
 
     def _heavy():
         from voice_studio.heavy_smoke import heavy_checks

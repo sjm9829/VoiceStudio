@@ -110,6 +110,8 @@ class VoiceEditorDialog(QDialog):
         self._worker: QProcess | None = None
         self._buffer = JsonlBuffer()
         self._job_dir: Path | None = None
+        # P12.3 Final Hotfix: 자신이 실제로 acquire한 slot만 release하기 위한 ownership 상태.
+        self._job_slot_acquired = False
         self._result_event: dict | None = None
         self._error_message: str | None = None
         self._build_ui()
@@ -304,28 +306,51 @@ class VoiceEditorDialog(QDialog):
         except FfmpegNotFoundError:
             raise FfmpegNotFoundError()
 
+    def _release_job_slot(self):
+        """자신이 acquire한 GPU worker slot만 반납한다(P12.3 Final Hotfix)."""
+        if self._job_slot_acquired:
+            self._job_slot_acquired = False
+            jobs = getattr(self.context, "jobs", None)
+            if jobs is not None:
+                jobs.release()
+
     def _start_register_worker(self):
         from ..core.paths import safe_job_cache_dir
-        job = build_register_payload(
-            job_id=str(uuidlib.uuid4()), name=self.name_edit.text().strip(),
-            source_path=self.source_path or "",
-            start_s=self.wave.start_s, end_s=self.wave.end_s,
-            ref_text=self.transcript_edit.toPlainText().strip(),
-            profile_dir=str(self.context.profile_repository.root),
-            model_path=self.context.model_manager.model_path())
-        job_dir = safe_job_cache_dir(job["job_id"])
-        job_file = job_dir / "job.json"
-        job_file.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
-        self._job_dir = job_dir
-        self._buffer = JsonlBuffer()
-        self._result_event = None
-        self._error_message = None
-        program, args = worker_command(str(job_file))
-        self._worker = QProcess(self)
-        self._worker.readyReadStandardOutput.connect(self._on_worker_output)
-        self._worker.readyReadStandardError.connect(self._on_worker_stderr)
-        self._worker.finished.connect(self._on_register_finished)
-        self._worker.start(program, args)
+        # 동시 worker 1개 제한(P12.3-25): narrate 등 다른 worker 실행 중이면 시작하지 않는다.
+        if not self.context.jobs.try_acquire():
+            QMessageBox.warning(
+                self,
+                "보이스 스튜디오",
+                "다른 작업이 실행 중입니다. 완료 후 다시 시도해 주세요.",
+            )
+            return
+        # 여기서부터는 어떤 예외가 나도 slot을 반납해야 한다(P12.3 Final Hotfix 3-2).
+        self._job_slot_acquired = True
+        try:
+            job = build_register_payload(
+                job_id=str(uuidlib.uuid4()), name=self.name_edit.text().strip(),
+                source_path=self.source_path or "",
+                start_s=self.wave.start_s, end_s=self.wave.end_s,
+                ref_text=self.transcript_edit.toPlainText().strip(),
+                profile_dir=str(self.context.profile_repository.root),
+                model_path=self.context.model_manager.model_path())
+            job_dir = safe_job_cache_dir(job["job_id"])
+            job_file = job_dir / "job.json"
+            job_file.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
+            self._job_dir = job_dir
+            self._buffer = JsonlBuffer()
+            self._result_event = None
+            self._error_message = None
+            program, args = worker_command(str(job_file))
+            self._worker = QProcess(self)
+            self._worker.readyReadStandardOutput.connect(self._on_worker_output)
+            self._worker.readyReadStandardError.connect(self._on_worker_stderr)
+            self._worker.finished.connect(self._on_register_finished)
+            self._worker.start(program, args)
+        except Exception:
+            self._release_job_slot()
+            self._worker = None
+            raise
         self.save_btn.setEnabled(False)
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)  # 불확정 진행
@@ -349,31 +374,43 @@ class VoiceEditorDialog(QDialog):
         pass
 
     def closeEvent(self, event):
-        # P12.3-25: 대화상자가 닫히면 worker 슬롯을 반납한다(등록 중 닫기 포함).
-        jobs = getattr(self.context, "jobs", None)
-        if jobs is not None:
-            jobs.release()
+        """P12.3 Final Hotfix: 무조건 release하지 않는다.
+
+        등록 worker 실행 중이 아니면 coordinator를 건드리지 않고, 실행 중이면
+        worker 종료를 요청한다. slot 반납은 _on_register_finished에서 수행하므로
+        다른 화면이 점유한 narrate slot을 여기서 풀 수 없다.
+        """
+        if self._worker is not None:
+            terminate = getattr(self._worker, "terminate", None)
+            if callable(terminate):
+                terminate()
+                QTimer.singleShot(3000, self._worker.kill)  # terminate 실패 시 강제 종료
         super().closeEvent(event)
 
     def _on_register_finished(self, code, status):
-        if self._worker is not None:
-            try:
-                for ev in self._buffer.feed(bytes(self._worker.readAllStandardOutput())):
-                    if ev.get("kind") == "result":
-                        self._result_event = ev
-                    elif ev.get("kind") == "error" and self._error_message is None:
-                        self._error_message = ev.get("message", "")
-            except Exception:
-                pass
-        self.progress.setVisible(False)
-        self.save_btn.setEnabled(True)
-        self._cleanup_job()
-        self._worker = None
-        if code == 0 and self._result_event is not None:
-            self.status_label.setText("")
-            self.accept()
-        else:
-            QMessageBox.warning(self, "등록 실패", self._error_message or "등록에 실패했습니다.")
+        try:
+            if self._worker is not None:
+                try:
+                    for ev in self._buffer.feed(bytes(self._worker.readAllStandardOutput())):
+                        if ev.get("kind") == "result":
+                            self._result_event = ev
+                        elif ev.get("kind") == "error" and self._error_message is None:
+                            self._error_message = ev.get("message", "")
+                except Exception:
+                    pass
+            # P12.3 Final Hotfix: UI 후처리 중 예외가 나도 slot 반납은 보장한다(성공/실패 공통).
+            self._release_job_slot()
+            self.progress.setVisible(False)
+            self.save_btn.setEnabled(True)
+            self._cleanup_job()
+            self._worker = None
+            if code == 0 and self._result_event is not None:
+                self.status_label.setText("")
+                self.accept()
+            else:
+                QMessageBox.warning(self, "등록 실패", self._error_message or "등록에 실패했습니다.")
+        finally:
+            self._release_job_slot()
 
     def _cleanup_job(self):
         try:

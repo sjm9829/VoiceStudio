@@ -142,6 +142,17 @@ P01~P11 소스·테스트 1차 구현 완료. P09~P11 일부(설정 UX/통합/�
 
 ## P12.3 Final Packaging Blockers
 
+### Final Hotfix
+- PyInstaller collection timing fix: `VoiceStudio.spec`은 `collect_submodules`/`collect_data_files`/`collect_all`(`spec_helpers.merge_collect`) 결과를 Analysis 생성 전에 전부 준비해 constructor에 전달한다. Analysis 이후 `a.hiddenimports/a.datas/a.binaries` 수정은 없음(AST regression 검증).
+- frozen FFprobe smoke fix: `run_smoke_test()`의 FFmpeg/FFprobe 검사가 어댑터 인스턴스의 `ffmpeg`/`ffprobe` 속성과 `probe_version()`으로 실제 binary 실행 가능 여부까지 확인. 잘못된 인스턴스 `_resolve_binary` 호출 제거.
+- worker slot ownership fix: MainWindow와 VoiceEditorDialog 모두 `_job_slot_acquired` ownership 상태로 자신이 acquire한 slot만 release. register 시작 거절 메시지, acquire 이후 startup 예외 시 즉시 반납, `_on_register_finished`의 try/finally 반납, closeEvent는 worker 실행 중에만 terminate(+kill fallback) 요청하고 즉시 release하지 않음.
+- concurrency regression tests: narrate busy 중 register 거절, 빈 dialog close 시 slot 유지, register busy 중 narrate 거절, register finish 반납, startup 예외 반납, register 실행 중 close의 premature release 없음, MainWindow ownership.
+- build script: torch/torchaudio before/after 기록을 `=== BEFORE/AFTER QWEN-TTS ===` 라벨+실제 값으로 정리.
+- `check_ffmpeg.py`: GPL 구성 발견 시 WARN 대신 FAIL(exit 1). `ffmpeg -buildconf` 실행 출력을 license 근거 로그에 추가.
+- 테스트: 148 passed / 6 skipped / 0 failed (hotfix 신규 regression 12개 포함).
+
+## P12.3 Final Packaging Blockers
+
 ### 코드 수준 완료
 - P12.3-01/22 collect_all 반환 계약: `packaging/spec_helpers.apply_collect`로 datas/binaries/hiddenimports를 올바르게 매핑(test_p12_3_packaging).
 - P12.3-02 spec repository root: SPECPATH 계약 기반 경로 존재 regression.

@@ -43,6 +43,8 @@ class MainWindow(QMainWindow):
         self._buffer = JsonlBuffer()
         self._stderr_chunks: list[str] = []
         self._job_dir: Path | None = None
+        # P12.3 Final Hotfix: 자신이 실제로 acquire한 slot만 release하기 위한 ownership 상태.
+        self._job_slot_acquired = False
         self._cancel_requested = False
         self._last_output: str | None = None
         self._result_received = False
@@ -155,29 +157,42 @@ class MainWindow(QMainWindow):
             bitrate_kbps=int(self.context.settings.get("mp3_bitrate_kbps", 192)),
             model_path=self.context.model_manager.model_path())
 
+    def _release_job_slot(self):
+        """자신이 acquire한 GPU worker slot만 반납한다(P12.3 Final Hotfix)."""
+        if self._job_slot_acquired:
+            self._job_slot_acquired = False
+            self.context.jobs.release()
+
     def _start_worker(self, payload: dict) -> bool:
         import json
         # 동시 worker 1개 제한(P12.3-25): register 등 다른 worker 실행 중이면 시작하지 않는다.
         if not self.context.jobs.try_acquire():
             QMessageBox.warning(self, "보이스 스튜디오", "다른 작업이 실행 중입니다. 완료 후 다시 시도해 주세요.")
             return False
-        # 연속 생성 시 이전 성공 결과 캐시를 먼저 정리한다(P12.3-18).
-        self._cleanup_job()
-        self._last_output = None
-        job_id = payload["job_id"]
-        job_dir = safe_job_cache_dir(job_id)
-        job_file = job_dir / "job.json"
-        job_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        self._job_dir = job_dir
-        self._buffer = JsonlBuffer()
-        self._stderr_chunks = []
-        self._result_received = False
-        program, args = worker_command(str(job_file))
-        self._worker = QProcess(self)
-        self._worker.readyReadStandardOutput.connect(self._on_worker_output)
-        self._worker.readyReadStandardError.connect(self._on_worker_stderr)
-        self._worker.finished.connect(self._on_worker_finished)
-        self._worker.start(program, args)
+        # acquire 이후 예외가 나도 slot을 반납한다(P12.3 Final Hotfix 3-2).
+        self._job_slot_acquired = True
+        try:
+            # 연속 생성 시 이전 성공 결과 캐시를 먼저 정리한다(P12.3-18).
+            self._cleanup_job()
+            self._last_output = None
+            job_id = payload["job_id"]
+            job_dir = safe_job_cache_dir(job_id)
+            job_file = job_dir / "job.json"
+            job_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            self._job_dir = job_dir
+            self._buffer = JsonlBuffer()
+            self._stderr_chunks = []
+            self._result_received = False
+            program, args = worker_command(str(job_file))
+            self._worker = QProcess(self)
+            self._worker.readyReadStandardOutput.connect(self._on_worker_output)
+            self._worker.readyReadStandardError.connect(self._on_worker_stderr)
+            self._worker.finished.connect(self._on_worker_finished)
+            self._worker.start(program, args)
+        except Exception:
+            self._release_job_slot()
+            self._worker = None
+            raise
         self.generate_btn.setEnabled(False)
         self.save_btn.setEnabled(False)
         self.play_btn.setEnabled(False)
@@ -229,7 +244,7 @@ class MainWindow(QMainWindow):
                 pass
         self.cancel_btn.setVisible(False)
         self.generate_btn.setEnabled(True)
-        self.context.jobs.release()  # P12.3-25: 종료 시 worker 슬롯 반납
+        self._release_job_slot()  # P12.3 Final Hotfix: 자신이 acquire한 slot만 반납
         if self._cancel_requested:
             self.status_label.setText("작업을 취소했습니다.")
             self._cleanup_job()
@@ -278,8 +293,10 @@ class MainWindow(QMainWindow):
     def request_cancel(self):
         self._cancel_requested = True
         if self._worker is not None:
-            self._worker.terminate()
-            QTimer.singleShot(3000, self._worker.kill)  # terminate 실패 시 강제 종료
+            terminate = getattr(self._worker, "terminate", None)
+            if callable(terminate):
+                terminate()
+                QTimer.singleShot(3000, self._worker.kill)  # terminate 실패 시 강제 종료
 
     def play_preview(self):
         """완성된 MP3를 재생한다. Windows: 기본 연결 프로그램, 그 외: QtMultimedia."""
@@ -318,7 +335,16 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "보이스 스튜디오", f"MP3를 저장했습니다:\n{path}")
 
     def closeEvent(self, event):
-        """정상 종료 시 미저장 생성 결과 캐시를 정리하고 worker 슬롯을 반납한다."""
-        self.context.jobs.release()
+        """정상 종료 시 미저장 생성 결과 캐시를 정리한다(P12.3 Final Hotfix).
+
+        무조건 release하지 않는다. 자신이 acquire한 slot만 반납하며, narrate
+        worker 실행 중 종료 시에는 worker 종료를 요청하고 slot 반납은
+        _on_worker_finished에서 수행한다.
+        """
+        if self._worker is not None:
+            terminate = getattr(self._worker, "terminate", None)
+            if callable(terminate):
+                terminate()
+                QTimer.singleShot(3000, self._worker.kill)  # terminate 실패 시 강제 종료
         self._cleanup_job()
         super().closeEvent(event)
