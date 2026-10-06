@@ -1,15 +1,15 @@
 @echo off
-REM 보이스 스튜디오 Windows 빌드 (PyInstaller onedir, packaging\VoiceStudio.spec)
+REM Voice Studio Windows build (PyInstaller onedir, packaging\VoiceStudio.spec)
 setlocal
 cd /d "%~dp0.."
 
-REM CUDA wheel 태그(P12.2-12): cu124처럼 낡은 조합을 하드코딩하지 않는다.
-REM CUDA_TAG를 빌드 시점에 지정할 수 있고, 기본은 현재 권장 cu126
-REM (torch CUDA wheel에서 RTX 2070 SUPER/CC 7.5 지원). 다른 조합은 환경변수로 교체.
+REM CUDA wheel tag (P12.2-12): do not hardcode an outdated combo like cu124.
+REM CUDA_TAG can be overridden at build time; default is the current recommended
+REM cu126 (torch CUDA wheel supports RTX 2070 SUPER / CC 7.5).
 if "%CUDA_TAG%"=="" set CUDA_TAG=cu126
 
-REM FFmpeg build prerequisite(P12.3-03): binary는 repository에 commit하지 않고
-REM 빌드 전에 third_party\bin에 준비한다. 없으면 BUILD_OK가 나오지 않도록 중단한다.
+REM FFmpeg build prerequisite (P12.3-03): binaries are not committed to the
+REM repository. Prepare them in third_party\bin before building; abort otherwise.
 if not exist third_party\bin\ffmpeg.exe (
     echo [FAIL] third_party\bin\ffmpeg.exe missing
     echo        Prepare the LGPL ffmpeg.exe build prerequisite in third_party\bin first.
@@ -19,7 +19,8 @@ if not exist third_party\bin\ffprobe.exe (
     echo [FAIL] third_party\bin\ffprobe.exe missing
     goto :err
 )
-REM 공급 binary의 license/buildconf를 실제로 확인한다(P12.3-04). GPL 구성이면 배포 전 재검토.
+REM Verify the license/buildconf of the supplied binaries (P12.3-04). Review again
+REM before distribution if a GPL configuration is detected.
 python scripts\check_ffmpeg.py || goto :err
 
 python -m venv .venv || goto :err
@@ -27,35 +28,37 @@ call .venv\Scripts\activate
 
 python -m pip install --upgrade pip || goto :err
 
-REM pyproject.toml extras와 일치: dev(pytest/pytest-qt). UI/audio/transcribe 의존성은
-REM base dependencies로 이동되어 있다(P12.1-10).
+REM Matches pyproject.toml extras: dev (pytest/pytest-qt). UI/audio/transcribe
+REM dependencies were moved into base dependencies (P12.1-10).
 pip install -e ".[dev]" || goto :err
 
-REM GPU/TTS 런타임: qwen-tts는 PyPI에서 설치하고, 설치 전후로 torch/torchaudio 버전을
-REM 기록해 qwen-tts가 CUDA wheel을 교체/강등하는지 확인한다(P12.3-12).
-REM P12.3-11: torch와 torchaudio를 동일 CUDA wheel index에서 함께 설치해
-REM qwen-tts가 torchaudio를 CPU wheel로 강등/격상하지 않도록 먼저 고정한다.
+REM GPU/TTS runtime: install qwen-tts from PyPI and record torch/torchaudio
+REM versions before and after to verify qwen-tts does not downgrade/replace the
+REM CUDA wheels (P12.3-12).
+REM P12.3-11: install torch and torchaudio together from the same CUDA wheel
+REM index first, so qwen-tts cannot downgrade torchaudio to a CPU wheel.
 python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/%CUDA_TAG% || goto :err
-REM P12.3 Final Hotfix: before/after 값을 라벨과 함께 실제로 기록해 사람이 읽어도 정확하게 한다.
+REM P12.3 Final Hotfix: record before/after values with explicit labels.
 echo === BEFORE QWEN-TTS === > build_torch_version.txt
 python -c "import torch, torchaudio; print('torch', torch.__version__); print('torchaudio', torchaudio.__version__); print('cuda', torch.version.cuda)" >> build_torch_version.txt || goto :err
 pip install qwen-tts || goto :err
 echo === AFTER QWEN-TTS === >> build_torch_version.txt
 python -c "import torch, torchaudio; print('torch', torch.__version__); print('torchaudio', torchaudio.__version__); print('cuda', torch.version.cuda); assert torch.version.cuda is not None" >> build_torch_version.txt || goto :err
 type build_torch_version.txt
-REM pip 의존성 무결성 확인(qwen-tts가 torch/transformers를 충돌 버전으로 격상/강등하지 않았는지)
+REM pip dependency integrity check (qwen-tts must not bump/downgrade torch/transformers to conflicting versions)
 python -m pip check || goto :err
 
-REM 런타임 패키지 무결성 검사(GPU/빌드 역할 분리): 빌드 머신에 GPU가 없어도 된다.
-REM 실제 CUDA/GPU 검증은 P13 대상 PC의 scripts\check_cuda.py와 --require-gpu 스모크에서 수행.
+REM Runtime package integrity check (build/GPU validation split): no GPU needed
+REM on the build machine. Real CUDA/GPU validation runs on the P13 target PC via
+REM scripts\check_cuda.py and the --require-gpu smoke.
 python scripts\check_runtime_packages.py || goto :err
 
 pip install pyinstaller || goto :err
 pyinstaller --noconfirm --clean packaging\VoiceStudio.spec || goto :err
 
-REM frozen 스모크: CPU-safe(패키징 무결성). CUDA unavailable은 SKIP이며 실패가 아니다.
+REM Frozen smoke: CPU-safe (packaging integrity). CUDA unavailable is a SKIP, not a failure.
 dist\VoiceStudio\VoiceStudio.exe --smoke-test || goto :err
-REM 빌드 결과물의 FFmpeg 실제 포함 검증(P12.3-05)
+REM Verify FFmpeg is actually bundled in the build output (P12.3-05)
 python scripts\check_dist.py || goto :err
 
 echo BUILD_OK dist\VoiceStudio

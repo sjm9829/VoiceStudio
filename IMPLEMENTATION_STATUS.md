@@ -188,7 +188,23 @@ P01~P11 소스·테스트 1차 구현 완료. P09~P11 일부(설정 UX/통합/�
 
 READY FOR P13 WINDOWS GPU E2E (코드 검토 레벨 blocker는 모두 처리, 남은 항목은 위 실기 대기 목록)
 
-## Build/GPU Validation 역할 분리 (2026-10-06, 코드 레벨 완료)
+## ### P12.3 Final Hotfix 3: Stable ABI torch/torchaudio 검증 (2026-10-06, 실제 Windows build finding)
+
+실제 Windows build 로그에서 torch 2.14.1+cu126 / torchaudio 2.11.0+cu126 조합이
+exact-version equality 검사 때문에 false failure(CHECK_RUNTIME_PACKAGES_FAILED)로
+빌드가 중단되는 것을 확인했다. TorchAudio 2.11은 PyTorch Stable ABI 기반이며
+torch >= 2.11 이상(future release 포함)과 동작하므로 exact equality 요구를 제거했다.
+
+- `scripts/version_compat.py` 신규: 공통 Stable ABI 규칙
+  (torch >= 2.11, torchaudio >= 2.11, torchaudio <= torch, exact equality 미요구).
+- `scripts/check_runtime_packages.py` / `scripts/check_cuda.py`: 위 helper 적용.
+- SoX / flash-attn 경고는 non-fatal로 유지(번들/설치 추가 없음, P13에서 실기 확인).
+- 모든 `*.bat` 파일을 ASCII-only로 정리(한글 REM/echo 제거, CMD 파싱 깨짐 방지),
+  ASCII-only regression 테스트 추가.
+- qwen-tts 설치 전후 조합은 실제 로그에서 동일하므로 build_windows.bat의
+  설치 버전 pin은 변경하지 않음.
+
+Build/GPU Validation 역할 분리 (2026-10-06, 코드 레벨 완료)
 
 ### 목적
 NVIDIA GPU가 없는 Windows 빌드 PC에서도 패키징이 성공하도록 build와 GPU validation을 분리.

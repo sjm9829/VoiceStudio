@@ -1,9 +1,9 @@
 @echo off
-REM Inno Setup 설치 프로그램 생성 (iscc 필요)
+REM Create the Inno Setup installer (iscc required)
 setlocal
 cd /d "%~dp0.."
 if not exist dist\VoiceStudio (
-  echo dist\VoiceStudio 가 없습니다. build_windows.bat 를 먼저 실행하세요.
+  echo dist\VoiceStudio is missing. Run build_windows.bat first.
   exit /b 1
 )
 iscc installer\voice-studio.iss || exit /b 1

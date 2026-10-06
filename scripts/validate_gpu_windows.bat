@@ -1,7 +1,9 @@
 @echo off
-REM P13 실기 GPU validation(P12.3 역할 분리): NVIDIA GPU가 있는 대상 PC에서 실행한다.
-REM 사용법: scripts\validate_gpu_windows.bat  (설치본 검증은
-REM "C:\Program Files\VoiceStudio\VoiceStudio.exe" --smoke-test --require-gpu 를 직접 실행)
+REM P13 on-machine GPU validation (P12.3 build/GPU split): run on the target PC
+REM with an NVIDIA GPU.
+REM Usage: scripts\validate_gpu_windows.bat
+REM For an installed build run directly:
+REM   "C:\Program Files\VoiceStudio\VoiceStudio.exe" --smoke-test --require-gpu
 setlocal
 cd /d "%~dp0.."
 

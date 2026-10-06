@@ -1,6 +1,7 @@
 @echo off
-REM frozen 빌드 셀프 스모크(P12.2-21): 설치 폴더에서 실행해 설치 무결성을 1차 확인한다.
-REM 사용법: scripts\smoke_frozen.bat [설치 폴더 경로]  (기본: repo\dist\VoiceStudio)
+REM Frozen build self smoke (P12.2-21): run from the install folder for a first
+REM integrity check.
+REM Usage: scripts\smoke_frozen.bat [install folder path]  (default: repo\dist\VoiceStudio)
 setlocal
 cd /d "%~dp0.."
 if "%~1"=="" (

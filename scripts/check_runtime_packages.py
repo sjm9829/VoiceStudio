@@ -10,6 +10,13 @@ P13 대상 PC에서 scripts/check_cuda.py와 frozen --require-gpu 스모크로 �
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from version_compat import check_torch_torchaudio_compat  # noqa: E402
+
 
 def main() -> int:
     ok = True
@@ -25,8 +32,10 @@ def main() -> int:
     except ImportError as e:
         print(f"[FAIL] torchaudio import: {e}")
         return 1
-    if torchaudio.__version__.split("+")[0] != torch.__version__.split("+")[0]:
-        print("[FAIL] torch/torchaudio 버전 family 불일치 - CUDA wheel 조합 확인 필요")
+    compat_ok, compat_msg = check_torch_torchaudio_compat(torch, torchaudio)
+    print("[OK] torch/torchaudio:", compat_msg if compat_ok else "")
+    if not compat_ok:
+        print(f"[FAIL] {compat_msg}")
         ok = False
     if torch.version.cuda is None:
         print("[FAIL] CUDA wheel이 아닙니다(torch.version.cuda is None).")

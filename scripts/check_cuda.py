@@ -8,6 +8,11 @@ bf16 지원/qwen_tts import/Qwen3TTSModel import/nvidia-smi(P12.3-14).
 
 import subprocess
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from version_compat import check_torch_torchaudio_compat  # noqa: E402
 
 
 def main() -> int:
@@ -23,8 +28,11 @@ def main() -> int:
     try:
         import torchaudio  # type: ignore
         print("torchaudio:", torchaudio.__version__)
-        if torchaudio.__version__.split("+")[0] != torch.__version__.split("+")[0]:
-            print("[FAIL] torch/torchaudio 버전 family 불일치 - CUDA wheel 조합 확인 필요")
+        compat_ok, compat_msg = check_torch_torchaudio_compat(torch, torchaudio)
+        if compat_ok:
+            print("[OK] torch/torchaudio:", compat_msg)
+        else:
+            print(f"[FAIL] {compat_msg}")
             ok = False
     except ImportError as e:
         print(f"[FAIL] torchaudio import: {e}")
