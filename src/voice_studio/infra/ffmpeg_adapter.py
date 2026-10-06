@@ -94,17 +94,36 @@ class RealFfmpegAdapter:
             "codec": audio.get("codec_name", ""),
         }
 
+    @staticmethod
+    def _validate_segment_range(start_s: float, end_s: float) -> float:
+        """절대 구간(start/end)을 FFmpeg용 duration으로 변환하고 유효성을 검증한다(P13).
+
+        호출자(UI/domain)는 절대 시각을 유지하고, FFmpeg에는 -ss(시작) + -t(길이)로만 전달한다.
+        -to는 절대 종료 시각 해석이 입력 파일마다 달라 Windows FFmpeg에서
+        "-to value smaller than -ss" 오류를 낼 수 있으므로 사용하지 않는다.
+        """
+        start_s = float(start_s)
+        duration_s = float(end_s) - start_s
+        if start_s < 0 or duration_s <= 0:
+            raise UnsupportedAudioError(
+                f"잘못된 선택 구간: start={start_s:.3f}s end={float(end_s):.3f}s")
+        return duration_s
+
     def decode_segment(self, path: str, start_s: float, end_s: float, sample_rate: int) -> np.ndarray:
-        args = [self.ffmpeg, "-v", "error", "-ss", f"{start_s:.3f}", "-to", f"{end_s:.3f}",
-                "-i", path, "-f", "f32le", "-ac", "1", "-ar", str(sample_rate), "-"]
+        duration_s = self._validate_segment_range(start_s, end_s)
+        args = [self.ffmpeg, "-v", "error", "-ss", f"{start_s:.3f}", "-i", path,
+                "-t", f"{duration_s:.3f}",
+                "-f", "f32le", "-ac", "1", "-ar", str(sample_rate), "-"]
         r = subprocess.run(args, capture_output=True, timeout=300)
         if r.returncode != 0:
             raise UnsupportedAudioError(r.stderr.decode(errors="replace")[:300])
         return np.frombuffer(r.stdout, dtype=np.float32)
 
     def decode_segment_to_flac(self, path: str, start_s: float, end_s: float, out_flac: str) -> str:
-        args = [self.ffmpeg, "-y", "-v", "error", "-ss", f"{start_s:.3f}", "-to", f"{end_s:.3f}",
-                "-i", path, "-ac", "1", "-ar", "24000", "-sample_fmt", "s32", out_flac]
+        duration_s = self._validate_segment_range(start_s, end_s)
+        args = [self.ffmpeg, "-y", "-v", "error", "-ss", f"{start_s:.3f}", "-i", path,
+                "-t", f"{duration_s:.3f}",
+                "-ac", "1", "-ar", "24000", "-sample_fmt", "s32", out_flac]
         r = self._run(args)
         if r.returncode != 0:
             raise UnsupportedAudioError(r.stderr.strip()[:300])

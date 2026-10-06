@@ -44,7 +44,7 @@ class _WaveformLoader(QThread):
 class _TranscribeThread(QThread):
     """선택 구간 디코딩 + 받아쓰기를 UI 스레드 밖에서 실행한다."""
     done = Signal(str)
-    failed = Signal(str)
+    failed = Signal(object)  # 실패 원인 예외 객체(카테고리별 안내 분리, P13 hotfix)
 
     def __init__(self, audio, transcriber, path, start_s, end_s):
         super().__init__()
@@ -60,7 +60,28 @@ class _TranscribeThread(QThread):
             text = self.transcriber.transcribe(pcm, config.REFERENCE_SAMPLE_RATE)
             self.done.emit(text)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(exc)
+
+def transcribe_failure_message(exc: Exception) -> str:
+    """받아쓰기 실패 원인에 따라 사용자 안내를 분리한다(P13 hotfix).
+
+    오디오 decode 실패와 모델 준비(다운로드/네트워크) 실패를 다른 안내로 구분하고
+    traceback이나 기술 상세는 UI에 노출하지 않는다.
+    """
+    from ..core.errors import UnsupportedAudioError, OfflineError
+    if isinstance(exc, UnsupportedAudioError):
+        return ("선택한 음성 구간을 읽을 수 없습니다.\n"
+                "다른 구간을 선택하거나 오디오 파일을 확인해 주세요.")
+    if isinstance(exc, OfflineError):
+        return ("자동 받아쓰기 모델을 준비할 수 없습니다.\n"
+                "인터넷 연결을 확인한 뒤 다시 시도해 주세요.")
+    text = str(exc)
+    lowered = text.lower()
+    if any(k in lowered for k in ("network", "connection", "timeout", "download", "offline")):
+        return ("자동 받아쓰기 모델을 준비할 수 없습니다.\n"
+                "인터넷 연결을 확인한 뒤 다시 시도해 주세요.")
+    return "자동 받아쓰기를 실행할 수 없습니다."
+
 
 class _PreviewThread(QThread):
     """선택 구간만 임시 WAV로 만들어 실제로 들어볼 수 있게 준비한다."""
@@ -86,7 +107,7 @@ class _PreviewThread(QThread):
             self.wav_path = wav_path
             self.ready.emit(wav_path)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(exc)
 
     def cleanup(self):
         if self.wav_path:
@@ -219,9 +240,17 @@ class VoiceEditorDialog(QDialog):
         self._preview_thread = _PreviewThread(self.context.audio, self.source_path,
                                               self.wave.start_s, self.wave.end_s)
         self._preview_thread.ready.connect(self._on_preview_ready)
-        self._preview_thread.failed.connect(
-            lambda msg: QMessageBox.warning(self, "보이스 스튜디오", f"들어보기를 실행할 수 없습니다.\n{msg}"))
+        self._preview_thread.failed.connect(self._on_preview_failed)
         self._preview_thread.start()
+
+    def _on_preview_failed(self, exc_or_msg):
+        """들어보기 실패: 짧은 사용자 안내만 노출하고 FFmpeg 상세는 로그로 남긴다(P13 hotfix)."""
+        import logging
+        detail = str(exc_or_msg)
+        logging.getLogger(__name__).warning("미리 듣기 실패: %s", detail)
+        QMessageBox.warning(
+            self, "보이스 스튜디오",
+            "선택한 음성 구간을 재생할 수 없습니다.\n오디오 파일과 선택 구간을 확인해 주세요.")
 
     def _on_preview_ready(self, wav_path: str):
         if hasattr(os, "startfile"):
@@ -260,11 +289,12 @@ class VoiceEditorDialog(QDialog):
             return
         self.transcript_edit.setPlainText(text)
 
-    def _on_transcribe_failed(self, message: str):
+    def _on_transcribe_failed(self, exc: object):
+        """실패 원인별 안내 분리(P13 hotfix). 기술 상세는 로그로만 남긴다."""
+        import logging
         self.status_label.setText("")
-        QMessageBox.warning(self, "받아쓰기 실패",
-                            "받아쓰기를 실행할 수 없습니다. 인터넷 연결과 설정을 확인해 주세요.\n"
-                            + message[:200])
+        logging.getLogger(__name__).warning("받아쓰기 실패: %s", exc, exc_info=isinstance(exc, BaseException))
+        QMessageBox.warning(self, "받아쓰기 실패", transcribe_failure_message(exc))
 
     # ---- 등록: worker 위임 ----
     def save(self):

@@ -23,11 +23,19 @@ class _ModelDownloadThread(QThread):
         self.force = force
 
     def run(self):
+        import logging
+        from ..core.errors import VoiceStudioError
         try:
             path = self.model_manager.download(force=self.force)
             self.done.emit(str(path))
+        except VoiceStudioError as exc:
+            # 앱 오류는 검증된 사용자 안내만 노출하고 기술 상세는 로그로 남긴다(P13 hotfix).
+            logging.getLogger(__name__).warning("모델 다운로드 실패: %s", exc.detail, exc_info=True)
+            self.failed.emit(exc.user_message)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            # 내부 예외('NoneType' object has no attribute 'write' 등)를 그대로 노출하지 않는다.
+            logging.getLogger(__name__).warning("모델 다운로드 실패: %s", exc, exc_info=True)
+            self.failed.emit("음성 모델을 받지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.")
 
 
 class SettingsDialog(QDialog):

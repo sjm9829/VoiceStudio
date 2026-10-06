@@ -261,3 +261,57 @@ NVIDIA GPU가 없는 Windows 빌드 PC에서도 패키징이 성공하도록 bui
   --require-gpu + CUDA unavailable 실패/available 성공,
   build_windows.bat check_cuda 미호출·check_runtime_packages 호출,
   check_runtime_packages GPU 검사 부재, validate_gpu_windows.bat 계약, require_gpu 시그니처).
+
+### P13 Windows Runtime Hotfix: HF progress 비활성화 + FFmpeg segment 계약 수정 (2026-10-06, 실제 설치본 실행 finding)
+
+실제 Windows 설치본 실행에서 두 개의 runtime blocker가 확인됐다.
+
+- 모델 다운로드 blocker: windowed PyInstaller(console=False)에서
+  sys.stdout/sys.stderr가 None인데 Hugging Face Hub console progress(tqdm)가 이에 write해
+  `모델 다운로드 실패: 'NoneType' object has no attribute 'write'`로 실패.
+  `HF_HUB_DISABLE_PROGRESS_BARS=1` 환경변수 수동 설정 시 실제 다운로드 성공을 실기에서 확인.
+- FFmpeg blocker: 선택 구간 들어보기·자동 받아쓰기·(잠재적)목소리 등록 FLAC이 모두
+  `Error opening input file ...: Invalid argument`로 실패. 실제 오류:
+  `[in#0] -to value smaller than -ss; aborting.` — 공통 FFmpeg segment extraction 계약 문제.
+
+수정 내용:
+
+- `src/voice_studio/services/model_manager.py`: `snapshot_download` 전에 공식 API
+  `huggingface_hub.utils.disable_progress_bars()`를 호출해 console progress를 끈다.
+  구버전 hub fallback은 프로세스 내 `HF_HUB_DISABLE_PROGRESS_BARS=1` setdefault.
+  전역 stdout/stderr 교체·fake TextIO 주입·console=True 변경 없음.
+  실패 시 기술 상세는 logging으로 남기고 사용자 메시지는
+  `음성 모델을 받지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.`로 분리.
+- `src/voice_studio/ui/settings_dialog.py`: `_ModelDownloadThread`가 VoiceStudioError의
+  user_message만 노출하고 내부 예외는 검증된 안내 메시지로 대체, 상세는 로그.
+- `src/voice_studio/infra/ffmpeg_adapter.py`: `decode_segment`/`decode_segment_to_flac`
+  최종 계약을 `-ss <start> -i <input> -t <duration>`으로 변경(-to 제거).
+  실행 전 `start_s >= 0`, `end_s > start_s`, `duration_s > 0` 검증, 위반 시
+  FFmpeg를 실행하지 않고 `UnsupportedAudioError`. 경로는 subprocess list argument 유지
+  (shell=True 없음, 한글/공백 경로 지원).
+- `src/voice_studio/ui/voice_editor_dialog.py`: 들어보기 실패 안내를
+  `선택한 음성 구간을 재생할 수 없습니다.\n오디오 파일과 선택 구간을 확인해 주세요.`로 변경하고
+  FFmpeg detail은 로그로. 받아쓰기 실패는 원인별 분리(UnsupportedAudioError →
+  `선택한 음성 구간을 읽을 수 없습니다.`, 모델 준비/네트워크 →
+  `자동 받아쓰기 모델을 준비할 수 없습니다.`, 그 외 → `자동 받아쓰기를 실행할 수 없습니다.`).
+- SoX/flash-attn 경고는 blocker 아님: SoX 번들/설치 금지, flash-attn 미설치 유지
+  (RTX 2070 SUPER Turing CC 7.5 FP16, FlashAttention-2 OFF 정책 유지).
+- `tests/test_p13_runtime_hotfix.py` 신규 regression 16개 + ffmpeg 미설치 skip 1개:
+  -ss/-t 계약(0~15, 75~87), -to 부재, invalid range(동일 구간/역순/음수) subprocess 미호출,
+  FLAC 동일 계약, 한글+공백 경로 list argument 유지,
+  disable_progress_bars가 snapshot_download 선행, console-less(sys.stdout=None) 다운로드 성공,
+  snapshot 실패 시 friendly OfflineError + partial 미완료 유지, 기존 정상 모델 보존,
+  받아쓰기 안내 3분류. 실제 ffmpeg 환경 integration은 75~87초 → 약 12초 출력 검증
+  (ffmpeg 미설치 환경에서는 skip).
+
+아직 미완료(실기 대기, P13 진행 중):
+
+- 수정 installer 재빌드(`scripts\build_windows.bat` → `scripts\make_installer.bat`)·재설치
+- 환경변수 없이 모델 다운로드 실기 성공
+- 실제 preview/STT/voice registration/Qwen voice clone generation 실기 성공
+- RTX 2070 SUPER 최종 P13 E2E, VRAM A~H
+- 재검증 순서는 docs/08_P13_WINDOWS_GPU_CHECKLIST.md 및 아래 P13 checklist 따름
+
+### 테스트
+- `uv run pytest`(offscreen Qt + 로컬 libGL): 195 passed / 7 skipped / 0 failed
+  (기존 179 passed에서 신규 16개 증가, ffmpeg 미설치 integration skip 1개 추가).
