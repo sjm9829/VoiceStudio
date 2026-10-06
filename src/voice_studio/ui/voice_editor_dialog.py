@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 import json
+import logging
+import math
 import os
 import shutil
 import uuid as uuidlib
@@ -19,7 +21,8 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QPu
                                QProgressBar)
 from ..core import config
 from ..core.errors import (VoiceStudioError, ProfileError, DuplicateNameError,
-                           ConsentRequiredError, TranscriptRequiredError, FfmpegNotFoundError)
+                           ConsentRequiredError, TranscriptRequiredError, FfmpegNotFoundError,
+                           UnsupportedAudioError)
 from ..core.paths import preview_cache_dir
 from ..workers.job_schema import build_register_payload
 from ..workers.launcher import worker_command
@@ -27,19 +30,38 @@ from ..workers.linebuffer import JsonlBuffer
 from .waveform_widget import WaveformWidget
 
 class _WaveformLoader(QThread):
+    """probe → duration 검증 → waveform을 순서대로 실행하는 로더(P13 waveform hotfix).
+
+    계약: 성공 시 done(peaks, duration) 1회, 실패 시 failed(예외) 1회.
+    실패를 done([], 0.0)으로 삼키지 않고, VoiceStudioError와 unexpected 예외 모두
+    failed로 전달해 UI가 실패/성공을 구분할 수 있게 한다. UI 스레드에서 절대 emit 이외
+    작업을 하지 않는다.
+    """
     done = Signal(list, float)
+    failed = Signal(object)
 
     def __init__(self, audio, path):
         super().__init__()
         self.audio = audio; self.path = path
 
     def run(self):
+        log = logging.getLogger(__name__)
         try:
+            log.info("파형 로딩: probe 시작 path=%r", self.path)
+            info = self.audio.probe(self.path)
+            duration = info["duration"]
+            if not (isinstance(duration, (int, float)) and math.isfinite(float(duration))
+                    and float(duration) > 0):
+                raise UnsupportedAudioError(
+                    f"재생 시간을 확인할 수 없습니다: {duration!r}")
+            log.info("파형 로딩: probe 완료 duration=%.3fs, waveform 시작", float(duration))
             peaks = self.audio.waveform(self.path)
-            dur = self.audio.probe(self.path)["duration"]
-            self.done.emit(peaks, dur)
-        except VoiceStudioError:
-            self.done.emit([], 0.0)
+            log.info("파형 로딩: waveform 완료 buckets=%d", len(peaks))
+            self.done.emit(peaks, float(duration))
+        except Exception as exc:
+            log.warning("파형 로딩 실패: path=%r %s: %s", self.path,
+                        type(exc).__name__, exc, exc_info=True)
+            self.failed.emit(exc)
 
 class _TranscribeThread(QThread):
     """선택 구간 디코딩 + 받아쓰기를 UI 스레드 밖에서 실행한다."""
@@ -126,6 +148,7 @@ class VoiceEditorDialog(QDialog):
         self.resize(700, 560)
         self.source_path = None
         self.duration = 0.0
+        self._analyzing = False
         self._transcribe_thread = None
         self._preview_thread = None
         self._worker: QProcess | None = None
@@ -202,26 +225,73 @@ class VoiceEditorDialog(QDialog):
         self.name_edit.setText(profile.name)
         self.transcript_edit.setPlainText(profile.ref_text)
 
+    def _reset_waveform_state(self):
+        """파형/선택/기간 state를 완전히 초기화한다(P13 waveform hotfix).
+
+        파일 로드 실패 시 이전 파일의 파형·선택·기간을 재사용하지 않는다.
+        """
+        self.duration = 0.0
+        self.wave.clear()
+        self.selection_label.setText("선택 구간: 없음")
+        self._warned_long = False
+
+    def _audio_ready(self) -> bool:
+        """분석 중/분석 실패 상태에서 preview/받아쓰기/등록을 차단한다(P13 waveform hotfix)."""
+        if self._analyzing:
+            QMessageBox.information(self, "보이스 스튜디오",
+                                    "오디오 파일을 분석하는 중입니다. 완료 후 다시 시도해 주세요.")
+            return False
+        if self.duration <= 0:
+            QMessageBox.information(self, "보이스 스튜디오", "먼저 참조 파일을 선택해 주세요.")
+            return False
+        return True
+
     def pick_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "참조 파일 선택", "", "오디오 파일 (*.mp3 *.m4a *.wav *.flac)")
         if not path:
             return
+        # 새 파일 분석 전 이전 파일 state를 먼저 완전히 초기화한다.
+        self._reset_waveform_state()
         self.source_path = path
         self.file_label.setText(path)
+        self._analyzing = True
+        self.status_label.setText("오디오 파일을 분석하는 중…")
         self._loader = _WaveformLoader(self.context.audio, path)
         self._loader.done.connect(self._on_peaks)
+        self._loader.failed.connect(self._on_load_failed)
         self._loader.start()
 
     def _on_peaks(self, peaks, duration):
+        self._analyzing = False
+        self.status_label.setText("")
         self.duration = duration
-        if duration <= 0:
-            QMessageBox.warning(self, "보이스 스튜디오", "오디오 파일을 열 수 없습니다.")
+        if not (isinstance(duration, (int, float)) and math.isfinite(float(duration))
+                and float(duration) > 0):
+            # 로더 계약상 발생하지 않지만, 방어적으로 실패 흐름과 동일하게 처리한다.
+            self._reset_waveform_state()
+            QMessageBox.warning(self, "보이스 스튜디오",
+                                "오디오 파일의 재생 시간을 확인할 수 없습니다.\n"
+                                "다른 파일을 선택하거나 오디오 파일을 확인해 주세요.")
             return
         self.wave.set_peaks(peaks, duration)
         # 기본 선택을 라벨이 아니라 실제 selection state로 반영(P12.1-04).
         # 긴 파일을 열어도 worker에는 권장 15초 구간만 전달된다.
         self.wave.set_selection(0.0, min(duration, config.REFERENCE_TARGET_SECONDS))
+
+    def _on_load_failed(self, exc: object):
+        """파형 로딩 실패: 이전 state 재사용 금지 + 사용자 안내(P13 waveform hotfix).
+
+        기술 상세(stderr/traceback)는 UI에 노출하지 않고 로그로만 남긴다.
+        """
+        self._analyzing = False
+        self.status_label.setText("")
+        self._reset_waveform_state()
+        logging.getLogger(__name__).warning(
+            "참조 파일 분석 실패: path=%r exc=%r", self.source_path, exc)
+        QMessageBox.warning(self, "보이스 스튜디오",
+                            "오디오 파일의 재생 시간을 확인할 수 없습니다.\n"
+                            "다른 파일을 선택하거나 오디오 파일을 확인해 주세요.")
 
     def _on_selection(self, start, end):
         self.selection_label.setText(f"선택 구간: {start:.1f}초 ~ {end:.1f}초 ({end - start:.1f}초)")
@@ -234,6 +304,8 @@ class VoiceEditorDialog(QDialog):
         """선택 구간만 임시 WAV로 만들어 실제로 재생하고, 재생 후 임시 파일을 정리한다."""
         if self.source_path is None:
             QMessageBox.information(self, "보이스 스튜디오", "먼저 참조 파일을 선택해 주세요.")
+            return
+        if not self._audio_ready():
             return
         if self._preview_thread is not None and self._preview_thread.isRunning():
             return
@@ -272,6 +344,8 @@ class VoiceEditorDialog(QDialog):
         if self.source_path is None:
             QMessageBox.information(self, "보이스 스튜디오", "먼저 참조 파일을 선택해 주세요.")
             return
+        if not self._audio_ready():
+            return
         if self._transcribe_thread is not None and self._transcribe_thread.isRunning():
             return
         self.status_label.setText("받아쓰기 중… (처음이라면 모델을 내려받는 중일 수 있습니다)")
@@ -302,6 +376,10 @@ class VoiceEditorDialog(QDialog):
             if self.uuid:
                 self.context.profile_service.rename(self.uuid, self.name_edit.text())
                 self.accept()
+                return
+            if self._analyzing:
+                QMessageBox.information(self, "보이스 스튜디오",
+                                        "오디오 파일을 분석하는 중입니다. 완료 후 다시 시도해 주세요.")
                 return
             self._validate_register_inputs()
             self._start_register_worker()

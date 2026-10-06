@@ -25,8 +25,9 @@ def tones(tmp_path):
     out = {}
     for ext in ("mp3", "m4a", "wav", "flac"):
         path = tmp_path / f"tone_korean test.{ext}"  # 한글 아닌 공백 포함 경로
-        subprocess_ok = RealFfmpegAdapter()._run(
-            ["-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+        adapter = RealFfmpegAdapter()
+        subprocess_ok = adapter._run(
+            [adapter.ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
              "-ar", "24000", "-ac", "1", str(path)])
         assert subprocess_ok.returncode == 0
         out[ext] = str(path)
@@ -37,7 +38,7 @@ def test_mp3_m4a_wav_flac_decode_to_24k_mono(tones):
     from voice_studio.services.audio_service import AudioService
     svc = AudioService()
     for path in tones.values():
-        pcm = svc.decode_reference_segment(path, 0.0, 2.0)
+        pcm = svc.decode_reference_segment(path, 0.0, 3.0)
         assert pcm.dtype == np.float32 and pcm.ndim == 1 and pcm.size >= 24000
 
 
@@ -45,9 +46,9 @@ def test_reference_flac_roundtrip(tones):
     from voice_studio.services.audio_service import AudioService
     svc = AudioService()
     out = str(Path(tones["mp3"]).with_suffix(".ref.flac"))
-    svc.save_reference_flac(tones["mp3"], 0.0, 2.0, out)
-    pcm = svc.decode_reference_segment(out, 0.0, 1.0)
-    assert pcm.dtype == np.float32 and pcm.size >= 12000
+    svc.save_reference_flac(tones["mp3"], 0.0, 3.0, out)
+    pcm = svc.decode_reference_segment(out, 0.0, 3.0)
+    assert pcm.dtype == np.float32 and pcm.size >= 36000
 
 
 def test_pcm_to_mp3_all_bitrates(tmp_path):
@@ -68,7 +69,8 @@ def test_korean_path_roundtrip(tmp_path):
     korean_dir = tmp_path / "한글 폴더"
     korean_dir.mkdir()
     wav = korean_dir / "참조 음성.wav"
-    RealFfmpegAdapter()._run(["-y", "-f", "lavfi", "-i", "sine=frequency=300:duration=2",
-                              "-ar", "24000", "-ac", "1", str(wav)])
-    pcm = svc.decode_reference_segment(str(wav), 0.0, 1.5)
-    assert pcm.size > 0
+    adapter = RealFfmpegAdapter()
+    adapter._run([adapter.ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=300:duration=5",
+                  "-ar", "24000", "-ac", "1", str(wav)])
+    pcm = svc.decode_reference_segment(str(wav), 0.0, 3.0)
+    assert pcm.size >= 36000

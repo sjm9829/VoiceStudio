@@ -315,3 +315,60 @@ NVIDIA GPU가 없는 Windows 빌드 PC에서도 패키징이 성공하도록 bui
 ### 테스트
 - `uv run pytest`(offscreen Qt + 로컬 libGL): 195 passed / 7 skipped / 0 failed
   (기존 179 passed에서 신규 16개 증가, ffmpeg 미설치 integration skip 1개 추가).
+
+### P13 Reference Audio / Waveform Runtime Hotfix (2026-10-06, 실제 설치본에서 M4A 파형 빈 화면 finding)
+
+실제 Windows 설치본에서 M4A(카카오톡 수신 파일, 한글/공백 경로) 선택 시 파형이 빈 검은 화면으로
+남고 선택 구간이 0.0~0.0초로 유지되는 증상이 확인됐다.
+
+- **0.0초 실제 원인**: `_WaveformLoader.run()`이 모든 `VoiceStudioError`를
+  `except VoiceStudioError: self.done.emit([], 0.0)`으로 삼켜서 실패를 빈 파형 + 0.0초 성공으로
+  위장했다. 또한 `RealFfmpegAdapter.probe()`가 duration 부재 시
+  `float(... or 0.0)`으로 0.0을 정상값처럼 반환했다. probe/waveform 어느 단계에서 실패했는지
+  사용자도 로그도 알 수 없었다.
+- 수정 내용:
+  - `src/voice_studio/ui/voice_editor_dialog.py`:
+    - `_WaveformLoader` 계약 변경: `done = Signal(list, float)` 성공 1회 /
+      `failed = Signal(object)` 실패 1회. probe → duration 검증(NaN/inf/<=0 포함) → waveform
+      순서로 분리하고 단계별 로그 기록. `VoiceStudioError`와 unexpected 예외 모두 failed로
+      전달(UI crash 없음).
+    - `pick_file()`은 새 파일 분석 전 `_reset_waveform_state()`로 이전 파일의 파형/선택/기간을
+      완전히 초기화하고, "오디오 파일을 분석하는 중…" 상태 표시. 분석 중에는 들어보기/자동
+      받아쓰기/등록이 차단된다(`_audio_ready()` guard).
+    - `_on_load_failed()`는 사용자 안내
+      (`오디오 파일의 재생 시간을 확인할 수 없습니다. 다른 파일을 선택하거나 오디오 파일을 확인해 주세요.`)
+      + 완전 reset(duration=0, peaks clear, "선택 구간: 없음"). 기술 상세는 로그만.
+    - 성공 시 기존 계약 유지: `set_peaks(peaks, duration)` 후
+      `set_selection(0.0, min(duration, REFERENCE_TARGET_SECONDS))`.
+  - `src/voice_studio/ui/waveform_widget.py`: `clear()` reset API 추가(파형/기간/선택 초기화,
+    selection_changed 미발사).
+  - `src/voice_studio/infra/ffmpeg_adapter.py`:
+    - `parse_duration_seconds()`: format.duration → stream.duration 순서, 부재/NaN/inf/<=0은
+      `UnsupportedAudioError`(0.0 변환 제거). probe/waveform/decode_segment 실패 시
+      operation/path/exception/stderr/returncode를 logging으로 기록(기존 logging_setup 체계,
+      UI에 traceback 노출 없음). waveform 디코딩 결과가 비면 0.0 버킷 대신 실패.
+    - FFmpeg 호출은 계속 subprocess list argument(shell 금지), 한글/공백 경로 유지.
+- `tests/test_p13_waveform_hotfix.py` 신규 regression 29개: loader 성공/실패 계약,
+  invalid duration 5종은 실패 처리, probe 실패 시 waveform 미실행, UI 시나리오
+  A(600초→0~15)/B(8초→0~8)/C(probe 실패→reset+안내+등록 차단)/D(waveform 실패→reset)/
+  E(첫 파일 60초 성공 후 probe 실패→이전 state 재사용 금지), 분석 중 액션 차단,
+  `WaveformWidget.clear()`, probe duration 파싱(format 우선/stream fallback/부재·N/A·Infinity
+  실패/오디오 스트림 없음/returncode 실패), 한글+공백 M4A 경로, shell 금지 list argument.
+  실제 FFmpeg integration(lavfi sine 20초 WAV probe≈20s, waveform bucket/peak,
+  AAC M4A 변환 + 한글 폴더 경로 probe/waveform) 포함, ffmpeg 미설치 환경 skip.
+- 기존 `tests/test_ffmpeg_real.py`는 ffmpeg 미설치로 항상 skip되어 숨어 있던 결함을 수정:
+  tone 생성 시 어댑터 binary 경로 누락, `decode_reference_segment` 최소 3초 계약 위반(2.0/1.5/1.0초
+  구간) → 5초 tone + 3초 구간으로 정합화. 실제 ffmpeg PATH 환경에서 4개 전부 통과 확인.
+- installer 식별(선택 항목 B): `installer/voice-studio.iss` `MyAppVersion`을 0.1.0 → 0.1.1로
+  bump해 기존 설치본(`VoiceStudio-Setup-0.1.0.exe`)과 새 설치본을 구분 가능. 모델/빌드 스크립트/
+  PyInstaller spec/Inno Setup 로직 자체는 변경 없음.
+
+### 테스트
+- `uv run pytest`(offscreen Qt + 로컬 libGL, ffmpeg PATH 미포함):
+  221 passed / 10 skipped / 0 failed (기존 195 passed에서 신규 29개 증가, ffmpeg integration skip).
+- 실제 FFmpeg 7.0.2 연동 확인: `tests/test_ffmpeg_real.py` + `tests/test_p13_waveform_hotfix.py`
+  = 33 passed / 0 failed (probe duration≈20s, waveform bucket 64/128, AAC M4A 한글 경로 포함).
+
+아직 미완료(실기 대기, P13 진행 중):
+
+- Windows 실기 재검증 전까지 preview/STT/registration 성공으로 표시하지 않음(기존 P13 미완료 항목 유지)

@@ -31,6 +31,18 @@ class WaveformWidget(QWidget):
         self.selection_changed.emit(self.start_s, self.end_s)
         self.update()
 
+    def clear(self):
+        """파형/기간/선택을 완전히 초기화한다(P13 waveform hotfix).
+
+        파일 로드 실패 시 이전 파일의 파형·선택이 재사용되지 않도록 dialog가 호출한다.
+        selection_changed는 내보내지 않는다(초기화 흐름은 dialog가 라벨/차단을 직접 갱신).
+        """
+        self.peaks = []
+        self.duration = 0.0
+        self.start_s = 0.0
+        self.end_s = 0.0
+        self.update()
+
     def _x_for(self, t: float) -> float:
         if self.duration <= 0:
             return 0.0

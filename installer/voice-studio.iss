@@ -1,6 +1,6 @@
 ; 보이스 스튜디오 설치 프로그램 (Inno Setup)
 #define MyAppName "보이스 스튜디오"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.1.1"
 
 [Setup]
 AppId={{B6A6C0E2-VOICE-STUDIO-0001}

@@ -4,13 +4,36 @@ AudioService는 이 인터페이스(FfmpegAdapter 프로토콜)만 의존하므�
 """
 
 from __future__ import annotations
-import json, shutil, subprocess
+import json, logging, math, shutil, subprocess
 from pathlib import Path
 from typing import Protocol
 import numpy as np
 from ..core.errors import FfmpegNotFoundError, UnsupportedAudioError
 
 SUPPORTED_SUFFIXES = (".mp3", ".m4a", ".wav", ".flac")
+
+_log = logging.getLogger(__name__)
+
+
+def parse_duration_seconds(fmt: dict, audio: dict) -> float:
+    """ffprobe 결과에서 유효한 duration만 추출한다(P13 waveform hotfix).
+
+    format.duration → stream.duration 순서로 시도한다. 값이 없거나 NaN/inf/<=0이면
+    0.0으로 숨기지 않고 UnsupportedAudioError를 발생시킨다(기존 silent-failure 제거).
+    """
+    for source, value in (("format", fmt.get("duration")), ("audio", audio.get("duration"))):
+        if value is None:
+            continue
+        try:
+            duration = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(duration) or math.isinf(duration) or duration <= 0:
+            continue
+        return duration
+    raise UnsupportedAudioError(
+        "ffprobe 결과에 유효한 재생 시간(duration)이 없습니다. "
+        "파일이 손상되었거나 지원하지 않는 형식일 수 있습니다.")
 
 class FfmpegAdapter(Protocol):
     def probe(self, path: str) -> dict: ...
@@ -76,18 +99,31 @@ class RealFfmpegAdapter:
 
     def probe(self, path: str) -> dict:
         if not path.lower().endswith(SUPPORTED_SUFFIXES):
+            _log.warning("probe 실패: 미지원 확장자 path=%r", path)
             raise UnsupportedAudioError(f"unsupported suffix: {path}")
         r = self._run([self.ffprobe, "-v", "error", "-print_format", "json",
                        "-show_format", "-show_streams", path])
         if r.returncode != 0:
-            raise UnsupportedAudioError(r.stderr.strip()[:300])
-        data = json.loads(r.stdout)
+            stderr = (r.stderr or "").strip()[:300]
+            _log.warning("probe 실패: path=%r returncode=%s stderr=%s", path, r.returncode, stderr)
+            raise UnsupportedAudioError(stderr or "ffprobe 실행 실패")
+        try:
+            data = json.loads(r.stdout)
+        except ValueError as exc:
+            _log.warning("probe 실패: path=%r ffprobe 출력 파싱 실패: %s", path, exc)
+            raise UnsupportedAudioError("ffprobe 출력을 해석할 수 없습니다.") from exc
         fmt = data.get("format", {})
         audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
         if audio is None:
+            _log.warning("probe 실패: path=%r 오디오 스트림 없음", path)
             raise UnsupportedAudioError("no audio stream")
+        try:
+            duration = parse_duration_seconds(fmt, audio)
+        except UnsupportedAudioError as exc:
+            _log.warning("probe 실패: path=%r %s", path, exc)
+            raise
         return {
-            "duration": float(fmt.get("duration") or audio.get("duration") or 0.0),
+            "duration": duration,
             "format_name": fmt.get("format_name", ""),
             "sample_rate": int(audio.get("sample_rate", 0)),
             "channels": int(audio.get("channels", 0)),
@@ -116,7 +152,10 @@ class RealFfmpegAdapter:
                 "-f", "f32le", "-ac", "1", "-ar", str(sample_rate), "-"]
         r = subprocess.run(args, capture_output=True, timeout=300)
         if r.returncode != 0:
-            raise UnsupportedAudioError(r.stderr.decode(errors="replace")[:300])
+            stderr = r.stderr.decode(errors="replace")[:300]
+            _log.warning("decode_segment 실패: path=%r start=%s end=%s returncode=%s stderr=%s",
+                         path, start_s, end_s, r.returncode, stderr)
+            raise UnsupportedAudioError(stderr or "ffmpeg 구간 디코딩 실패")
         return np.frombuffer(r.stdout, dtype=np.float32)
 
     def decode_segment_to_flac(self, path: str, start_s: float, end_s: float, out_flac: str) -> str:
@@ -134,10 +173,13 @@ class RealFfmpegAdapter:
         args = [self.ffmpeg, "-v", "error", "-i", path, "-f", "f32le", "-ac", "1", "-ar", "8000", "-"]
         r = subprocess.run(args, capture_output=True, timeout=600)
         if r.returncode != 0:
-            raise UnsupportedAudioError(r.stderr.decode(errors="replace")[:300])
+            stderr = r.stderr.decode(errors="replace")[:300]
+            _log.warning("waveform 실패: path=%r returncode=%s stderr=%s", path, r.returncode, stderr)
+            raise UnsupportedAudioError(stderr or "ffmpeg 파형 디코딩 실패")
         data = np.frombuffer(r.stdout, dtype=np.float32)
         if data.size == 0:
-            return [0.0] * buckets
+            _log.warning("waveform 실패: path=%r 디코딩 결과가 비어 있음", path)
+            raise UnsupportedAudioError("파형 디코딩 결과가 비어 있습니다.")
         idx = np.linspace(0, data.size, buckets + 1).astype(int)
         peaks = [float(np.max(np.abs(data[idx[i]:idx[i+1]]))) if idx[i+1] > idx[i] else 0.0
                  for i in range(buckets)]
