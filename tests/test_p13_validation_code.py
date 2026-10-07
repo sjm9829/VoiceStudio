@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -100,6 +101,50 @@ def test_validate_runtime_gpu_windows_bat_exists_ascii_only():
     assert "p13_runtime_e2e.py" in text
     # 사용자 audio/ref-text는 인자로 전달(hardcode 금지). source/frozen 분리 args.
     assert "%SOURCE_ARGS%" in text and "%FROZEN_ARGS%" in text
+
+
+def test_runtime_validation_selects_and_checks_repository_python_before_use():
+    text = (ROOT / "scripts" / "validate_runtime_gpu_windows.bat").read_text(encoding="ascii")
+    selection = 'set "PYTHON=%CD%\\.venv\\Scripts\\python.exe"'
+    guard = (
+        'if not exist "%PYTHON%" (\n'
+        '  echo [FAIL] .venv not found. Run scripts\\build_windows.bat first.\n'
+        '  goto :err\n'
+        ')'
+    )
+    first_call = text.index('"%PYTHON%" -c')
+    assert text.index('cd /d "%~dp0.."') < text.index(selection) < text.index(guard) < first_call
+    assert "print('executable', sys.executable)" in text
+    assert "print('python', sys.version)" in text
+
+
+def test_runtime_validation_has_no_system_python_or_activation_fallback():
+    text = (ROOT / "scripts" / "validate_runtime_gpu_windows.bat").read_text(encoding="ascii")
+    commands = [line.strip() for line in text.splitlines()
+                if line.strip() and not line.lstrip().lower().startswith("rem ")]
+    for line in commands:
+        assert not re.search(r'(?:^|[&|])\s*@?(?:call\s+)?"?(?:python(?:\d+(?:\.\d+)*)?|py)(?:\.exe)?"?\s',
+                             line, re.IGNORECASE), line
+    assert "activate" not in text.lower()
+    assert sum(line.lower().startswith('set "python=') for line in commands) == 1
+
+
+def test_runtime_validation_uses_same_python_for_every_stage():
+    text = (ROOT / "scripts" / "validate_runtime_gpu_windows.bat").read_text(encoding="ascii")
+    calls = [line.strip() for line in text.splitlines() if line.lstrip().startswith('"%PYTHON%" ')]
+    for stage in (
+        'scripts\\prepare_ffmpeg.py',
+        'scripts\\check_ffmpeg.py',
+        'scripts\\check_cuda.py',
+        '-m pytest -q tests\\test_gpu_real.py -m gpu',
+        'scripts\\p13_runtime_e2e.py %SOURCE_ARGS%',
+        'scripts\\p13_runtime_e2e.py --app-exe "dist\\VoiceStudio\\VoiceStudio.exe" %FROZEN_ARGS%',
+    ):
+        assert f'"%PYTHON%" {stage}' in calls
+    version_calls = [line for line in calls if line.startswith('"%PYTHON%" -c ')]
+    assert any("import sys;" in line for line in version_calls)
+    assert any("import torch;" in line for line in version_calls)
+    assert any("import torchaudio;" in line for line in version_calls)
 
 
 def test_all_bat_scripts_ascii_only():

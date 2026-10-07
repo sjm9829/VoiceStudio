@@ -10,6 +10,13 @@ REM PyInstaller bundled runtime (P13 section 22).
 setlocal
 cd /d "%~dp0.."
 
+REM Use the same repository environment that built the frozen artifact.
+set "PYTHON=%CD%\.venv\Scripts\python.exe"
+if not exist "%PYTHON%" (
+  echo [FAIL] .venv not found. Run scripts\build_windows.bat first.
+  goto :err
+)
+
 REM Split user args: --app-exe is rejected because frozen E2E always uses
 REM dist\VoiceStudio\VoiceStudio.exe, so a duplicate --app-exe cannot appear.
 set "SOURCE_ARGS="
@@ -28,25 +35,25 @@ goto :err
 
 echo === P13 runtime GPU validation ===
 echo Python / torch / torchaudio / CUDA combination record:
-python -c "import sys; print('python', sys.version)"
-python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
-python -c "import torchaudio; print('torchaudio', torchaudio.__version__)"
+"%PYTHON%" -c "import sys; print('executable', sys.executable); print('python', sys.version)"
+"%PYTHON%" -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
+"%PYTHON%" -c "import torchaudio; print('torchaudio', torchaudio.__version__)"
 if errorlevel 1 goto :err
 
 echo === prepare_ffmpeg (fixed LGPL artifact, SHA-256 verified) ===
-python scripts\prepare_ffmpeg.py
+"%PYTHON%" scripts\prepare_ffmpeg.py
 if errorlevel 1 goto :err
 
 echo === check_ffmpeg (license/buildconf/libmp3lame) ===
-python scripts\check_ffmpeg.py
+"%PYTHON%" scripts\check_ffmpeg.py
 if errorlevel 1 goto :err
 
 echo === check_cuda ===
-python scripts\check_cuda.py
+"%PYTHON%" scripts\check_cuda.py
 if errorlevel 1 goto :err
 
 echo === GPU pytest (tests\test_gpu_real.py -m gpu) ===
-python -m pytest -q tests\test_gpu_real.py -m gpu
+"%PYTHON%" -m pytest -q tests\test_gpu_real.py -m gpu
 if errorlevel 1 goto :err
 
 echo === SOURCE E2E ===
@@ -54,7 +61,7 @@ if not defined SOURCE_ARGS (
   echo [FAIL] missing arguments. Pass --audio / --ref-text / --generate-text.
   goto :err
 )
-python scripts\p13_runtime_e2e.py %SOURCE_ARGS%
+"%PYTHON%" scripts\p13_runtime_e2e.py %SOURCE_ARGS%
 if errorlevel 1 goto :err
 echo SOURCE_E2E_OK
 
@@ -69,7 +76,7 @@ dist\VoiceStudio\VoiceStudio.exe --smoke-test --require-gpu
 if errorlevel 1 goto :err
 
 echo === FROZEN E2E (bundled ffmpeg, frozen workers, frozen STT smoke) ===
-python scripts\p13_runtime_e2e.py --app-exe "dist\VoiceStudio\VoiceStudio.exe" %FROZEN_ARGS%
+"%PYTHON%" scripts\p13_runtime_e2e.py --app-exe "dist\VoiceStudio\VoiceStudio.exe" %FROZEN_ARGS%
 if errorlevel 1 goto :err
 echo FROZEN_E2E_OK
 
