@@ -195,7 +195,7 @@ def test_bf16_embedding_save_path_normalizes_to_fp32(tmp_path):
 # ---------------------------------------------------------------- worker IPC
 def test_emit_output_is_ascii_jsonl(capsys):
     from voice_studio.workers.protocol import emit, error_event
-    ev = error_event("E_TEST", "한글 오류 메시지 테스트", detail="상세 traceback \ 이상문자")
+    ev = error_event("E_TEST", "한글 오류 메시지 테스트", detail=r"상세 traceback \ 이상문자")
     emit(ev)
     out = capsys.readouterr().out
     raw = out.encode(sys.stdout.encoding or "utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8")

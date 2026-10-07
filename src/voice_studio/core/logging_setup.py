@@ -6,7 +6,7 @@ from pathlib import Path
 from .paths import logs_dir
 
 def setup_logging(level: int = logging.INFO) -> Path:
-    """파일 로깅을 항상 구성하고, 콘솔 handler는 stderr가 있을 때만 추가한다(P13).
+    r"""파일 로깅을 항상 구성하고, 콘솔 handler는 stderr가 있을 때만 추가한다(P13).
 
     PyInstaller console=False(windowed) 설치본에서 sys.stdout/sys.stderr가
     None일 수 있어 StreamHandler(None) 생성/출력이 실패한다. 파일 로그

@@ -11,24 +11,15 @@ from voice_studio.infra.qwen_adapter import preferred_dtype, RealQwenAdapter
 from voice_studio.workers.worker_main import _require_model_path, _release_gpu
 
 
-def test_dtype_policy_fp16_for_turing():
+def test_dtype_policy_fp16_for_turing(monkeypatch):
     """P12.2-10: RTX 2070 SUPER(CC 7.5) 기본 dtype은 torch.float16."""
-    # is_bf16_supported를 스텁해 Turing 상황을 재현한다.
-    orig = torch.cuda.is_bf16_supported
-    torch.cuda.is_bf16_supported = lambda *a, **k: False
-    try:
-        assert preferred_dtype("cuda:0") is torch.float16
-    finally:
-        torch.cuda.is_bf16_supported = orig
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda *a, **k: False)
+    assert preferred_dtype("cuda:0") is torch.float16
 
 
-def test_dtype_policy_bf16_when_supported():
-    orig = torch.cuda.is_bf16_supported
-    torch.cuda.is_bf16_supported = lambda *a, **k: True
-    try:
-        assert preferred_dtype("cuda:0") is torch.bfloat16
-    finally:
-        torch.cuda.is_bf16_supported = orig
+def test_dtype_policy_bf16_when_supported(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda *a, **k: True)
+    assert preferred_dtype("cuda:0") is torch.bfloat16
 
 
 def test_dtype_policy_cpu_not_forced():
@@ -44,8 +35,7 @@ def test_adapter_uses_dtype_object_not_string(monkeypatch):
         def from_pretrained(source, **kwargs):
             captured.update(kwargs)
             return "model"
-    import voice_studio.infra.qwen_adapter as qa
-    monkeypatch.setattr(qa, "Qwen3TTSModel", FakeModel)
+    _inject_fake_qwen_tts(monkeypatch, FakeModel)
     RealQwenAdapter(model_path="/tmp/x", device="cuda:0")
     assert isinstance(captured.get("dtype"), torch.dtype)
     assert not isinstance(captured.get("dtype"), str)
@@ -61,8 +51,7 @@ def test_adapter_flash_attention_failure_falls_back(monkeypatch):
             if kwargs.get("attn_implementation") == "flash_attention_2":
                 raise RuntimeError("flash_attention_2 not supported on this GPU")
             return "model"
-    import voice_studio.infra.qwen_adapter as qa
-    monkeypatch.setattr(qa, "Qwen3TTSModel", FakeModel)
+    _inject_fake_qwen_tts(monkeypatch, FakeModel)
     RealQwenAdapter(model_path="/tmp/x", device="cuda:0", flash_attention=True)
     assert calls == ["flash_attention_2", None]
 

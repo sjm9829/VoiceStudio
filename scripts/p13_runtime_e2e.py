@@ -55,18 +55,16 @@ def _worker_cmd(app_exe: str, job_path: Path) -> list[str]:
 def _isolate_data_root() -> Path:
     """E2E 전용 데이터 루트로 격리한다. 실제 사용자 profiles는 건드리지 않는다.
 
-    - Windows: LOCALAPPDATA를 temp로 격리(voice_studio.core.paths가 Windows에서
-      VOICE_STUDIO_DATA_DIR을 읽지 않으므로 LOCALAPPDATA 격리가 필요하다).
-    - 비-Windows: VOICE_STUDIO_DATA_DIR을 temp로 격리.
-    모델 캐시 경로는 격리 전에 먼저 확정하므로 재사용된다.
+    - Windows/비-Windows 모두 VOICE_STUDIO_DATA_DIR override를 사용한다
+      (paths.app_data_dir는 override를 OS 무관하게 우선한다).
+    - LOCALAPPDATA 전체를 바꾸지 않으므로 Windows의 다른 library/cache 동작에
+      영향이 없고, child source/frozen worker가 env를 상속해 동일 temp
+      profile/cache를 사용한다.
+    모델 캐시 경로는 격리 전에 먼저 확정하므로 기존 다운로드 모델이 재사용된다.
     """
     tmp_root = Path(tempfile.mkdtemp(prefix="p13_e2e_data_"))
-    if sys.platform == "win32":
-        import os
-        os.environ["LOCALAPPDATA"] = str(tmp_root)
-    else:
-        import os
-        os.environ["VOICE_STUDIO_DATA_DIR"] = str(tmp_root)
+    import os
+    os.environ["VOICE_STUDIO_DATA_DIR"] = str(tmp_root)
     return tmp_root
 
 

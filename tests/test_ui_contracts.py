@@ -40,8 +40,9 @@ def test_main_window_builds_full_narrate_payload(qtbot, stub_context, monkeypatc
     assert job.profile_dir == str(stub_context.profile_repository.root)
     assert job.model_path.endswith("snap")
     # P12.2-04: worker 결과는 job 캐시(jobs/<job_id>/result.mp3)에 저장된다.
-    assert job.output_path.endswith("/result.mp3")
-    assert job.output_path.split("/")[-2] == payload["job_id"]
+    out = Path(job.output_path)  # OS-independent path contract
+    assert out.name == "result.mp3"
+    assert out.parent.name == payload["job_id"]
     assert job.bitrate_kbps in (128, 192, 256)
     assert payload["job_id"]
 

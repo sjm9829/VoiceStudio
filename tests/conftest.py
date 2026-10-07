@@ -27,3 +27,12 @@ def registered(services, tmp_path):
         name="테스트 목소리", source_path=src, start_s=1.0, end_s=16.0,
         ref_text="안녕하세요. 테스트 대사입니다.", consent=True)
     return service, repo, audio, qwen, p
+
+@pytest.fixture(autouse=True)
+def _isolated_app_data(tmp_path, monkeypatch):
+    """모든 테스트의 app data를 temp로 격리해 실제 사용자 데이터를 보호한다.
+
+    env 자체를 검증하는 tests/test_paths.py는 자체 monkeypatch로
+    override/unset 상황을 재정의하므로 이 fixture와 충돌하지 않는다.
+    """
+    monkeypatch.setenv("VOICE_STUDIO_DATA_DIR", str(tmp_path / "appdata"))

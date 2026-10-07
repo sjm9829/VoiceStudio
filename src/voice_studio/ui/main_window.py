@@ -221,7 +221,7 @@ class MainWindow(QMainWindow):
         self._persist_worker_stderr(data)
 
     def _persist_worker_stderr(self, text: str) -> None:
-        """worker stderr를 %LOCALAPPDATA%\VoiceStudio\logs\worker-stderr.log에 append한다."""
+        r"""worker stderr를 %LOCALAPPDATA%\VoiceStudio\logs\worker-stderr.log에 append한다."""
         if not text:
             return
         logging.getLogger(__name__).warning("narrate worker stderr: %s", text)

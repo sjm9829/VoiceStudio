@@ -487,7 +487,7 @@ class VoiceEditorDialog(QDialog):
                 self._result_event = ev
 
     def _on_worker_stderr(self):
-        """worker stderr를 진단 로그 파일로 보존한다(P13 §7).
+        r"""worker stderr를 진단 로그 파일로 보존한다(P13 §7).
 
         UI에는 표시하지 않고, %LOCALAPPDATA%\VoiceStudio\logs\worker-stderr.log에
         job_id/mode/timestamp와 함께 append한다. stdout JSONL protocol과 섞지 않는다.

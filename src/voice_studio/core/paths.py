@@ -8,11 +8,19 @@ APP_DIR_NAME = "VoiceStudio"
 PROFILE_SCHEMA_VERSION = 1
 
 def app_data_dir() -> Path:
-    """%LOCALAPPDATA%\\VoiceStudio (Windows) 또는 ~/.local/state/VoiceStudio."""
+    r"""데이터 루트 결정.
+
+    우선순위: VOICE_STUDIO_DATA_DIR override(OS 무관) > Windows %LOCALAPPDATA%
+    > 비-Windows ~/.local/state. 최종 경로는 base / VoiceStudio.
+    override는 dev/test/E2E isolation 용도이며 일반 설치 앱에는 없다.
+    """
+    override = os.environ.get("VOICE_STUDIO_DATA_DIR")
+    if override:
+        return Path(override) / APP_DIR_NAME
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     else:
-        base = os.environ.get("VOICE_STUDIO_DATA_DIR") or str(Path.home() / ".local" / "state")
+        base = str(Path.home() / ".local" / "state")
     return Path(base) / APP_DIR_NAME
 
 def profiles_dir() -> Path:
