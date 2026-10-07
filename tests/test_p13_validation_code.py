@@ -186,6 +186,28 @@ def test_gpu_real_child_code_uses_module_scoped_validation_adapter():
     compile(code, "<roundtrip-child>", "exec")
 
 
+def test_gpu_real_child_code_wraps_profile_root_with_path():
+    """test_d child code는 ProfileRepository에 str이 아닌 Path를 넘겨야 한다.
+
+    production profile_dir는 `profiles_root / uuid`이므로 str root면
+    TypeError: unsupported operand type(s) for / 가 난다. 회귀: child code에
+    pathlib Path import와 ProfileRepository(Path(...))가 있어야 하고 compile 성공.
+    """
+    import test_gpu_real as tgr
+    code = tgr._roundtrip_child_code(
+        src=str(ROOT / "src"),
+        rvh=str(ROOT / "scripts" / "runtime_validation_helpers.py"),
+        root=str(ROOT / "tmp-profiles"), uuid="u", model="m", gen="g")
+    assert "from pathlib import Path;" in code
+    assert "ProfileRepository(Path(r'" in code
+    assert "ProfileRepository(r'" not in code  # str 직접 전달 금지
+    # ProfileRepository에 Path를 넘기면 profile_dir의 / 연산이 성립한다.
+    from voice_studio.infra.profile_repository import ProfileRepository
+    repo = ProfileRepository(Path(str(ROOT)))
+    assert str(repo.root / "u")  # 실제 / 연산 가능 확인
+    compile(code, "<roundtrip-child>", "exec")
+
+
 def test_gpu_real_child_code_prints_roundtrip_marker():
     import test_gpu_real as tgr
     code = tgr._roundtrip_child_code(
