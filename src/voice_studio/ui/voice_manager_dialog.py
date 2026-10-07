@@ -14,6 +14,9 @@ class VoiceManagerDialog(QDialog):
         self.resize(520, 420)
         layout = QVBoxLayout(self)
         self.list = QListWidget()
+        self.list.setAlternatingRowColors(True)  # P14 UX: 여러 항목을 한눈에 구분
+        # P14 UX: 더블 클릭으로 바로 편집(항목 선택 후 편집 버튼 순서 생략).
+        self.list.itemDoubleClicked.connect(lambda _item: self.edit_voice())
         layout.addWidget(self.list)
         buttons = QHBoxLayout()
         add = QPushButton("+ 목소리 등록")

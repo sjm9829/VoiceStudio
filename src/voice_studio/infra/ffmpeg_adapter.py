@@ -223,7 +223,7 @@ class FakeFfmpegAdapter:
     def __init__(self, duration: float = 10.0, sample_rate: int = 24000):
         self.duration = duration
         self.sample_rate = sample_rate
-        self.mp3_encoded: list[tuple[int, str]] = []
+        self.mp3_encoded: list[tuple[int, str, int, int]] = []
 
     def probe(self, path: str) -> dict:
         if not path.lower().endswith(SUPPORTED_SUFFIXES):
@@ -257,7 +257,8 @@ class FakeFfmpegAdapter:
         return out_path
 
     def encode_mp3(self, pcm: np.ndarray, sample_rate: int, bitrate_kbps: int, out_path: str) -> str:
-        self.mp3_encoded.append((bitrate_kbps, out_path))
+        # P14 회귀용 기록: (bitrate, 경로, gaur드 포함 pcm 길이, sample_rate)
+        self.mp3_encoded.append((bitrate_kbps, out_path, int(pcm.size), int(sample_rate)))
         with open(out_path, "wb") as fh:
             fh.write(b"FAKEMP3" + len(pcm).to_bytes(8, "little"))
         return out_path

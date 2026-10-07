@@ -15,6 +15,7 @@ import shutil
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QProcess, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
                                QPushButton, QPlainTextEdit, QLabel, QFileDialog, QMessageBox,
                                QProgressBar)
@@ -74,6 +75,10 @@ class MainWindow(QMainWindow):
         self.script_edit = QPlainTextEdit()
         self.script_edit.setPlaceholderText("음성으로 만들 대본을 입력하세요.")
         layout.addWidget(self.script_edit, 1)
+        # P14 UX: 대본 입력 중Enter로 생성 시작(탭 이동 없이 바로 실행).
+        shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
+        shortcut.setObjectName("scriptGenerateShortcut")
+        shortcut.activated.connect(self.start_generation)
 
         self.status_label = QLabel("")
         self.progress = QProgressBar()
@@ -101,10 +106,16 @@ class MainWindow(QMainWindow):
 
     # ---- 목소리 목록 ----
     def _refresh_voices(self):
+        # P14 UX: 관리 대화상자 닫기 후에도 선택한 목소리를 유지한다.
+        previous_uuid = self.voice_combo.currentData()
         self.voice_combo.clear()
         profiles = self.context.profile_service.list_profiles()
         for p in profiles:
             self.voice_combo.addItem(p.name, p.uuid)
+        if previous_uuid is not None:
+            index = self.voice_combo.findData(previous_uuid)
+            if index >= 0:
+                self.voice_combo.setCurrentIndex(index)
         if not profiles:
             self.status_label.setText("목소리를 먼저 등록해 주세요.")
 

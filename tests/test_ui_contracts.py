@@ -86,3 +86,49 @@ def test_register_ui_delegates_to_worker_not_fake_register():
     assert "profile_service.register(" not in text
     assert "_start_register_worker" in text
     assert "build_register_payload" in text and "worker_command" in text
+
+
+# ---- P14 UX regression ----
+
+def test_voice_combo_preserves_selection_after_refresh(qtbot, stub_context):
+    """목소리 관리 대화상자 닫은 뒤에도 선택한 목소리가 유지된다."""
+    from types import SimpleNamespace
+    from voice_studio.ui.main_window import MainWindow
+    stub_context.profile_service = SimpleNamespace(
+        list_profiles=lambda: [SimpleNamespace(name="A", uuid="u-a"),
+                               SimpleNamespace(name="B", uuid="u-b")])
+    win = MainWindow(stub_context)
+    qtbot.addWidget(win)
+    assert win.voice_combo.currentData() == "u-a"
+    win.voice_combo.setCurrentIndex(1)
+    win._refresh_voices()
+    assert win.voice_combo.currentData() == "u-b"
+
+
+def test_script_ctrl_enter_shortcut_registered(qtbot, stub_context):
+    """대본 화면에 Ctrl+Return 생성 단축키가 등록돼 있다."""
+    from PySide6.QtGui import QShortcut, QKeySequence
+    from voice_studio.ui.main_window import MainWindow
+    win = MainWindow(stub_context)
+    qtbot.addWidget(win)
+    shortcuts = [s for s in win.findChildren(QShortcut)
+                 if s.objectName() == "scriptGenerateShortcut"]
+    assert len(shortcuts) == 1
+    assert shortcuts[0].key() == QKeySequence("Ctrl+Return")
+
+
+def test_voice_manager_double_click_opens_edit(qtbot, stub_context):
+    """목록 항목 더블 클릭이 edit_voice 슬롯으로 연결된다(중첩 exec 회피: 슬롯 기록)."""
+    from types import SimpleNamespace
+    from voice_studio.ui.voice_manager_dialog import VoiceManagerDialog
+    stub_context.profile_service = SimpleNamespace(
+        list_profiles=lambda: [SimpleNamespace(
+            name="A", uuid="u-a", created_at="2025-01-01T00:00:00",
+            reference_duration_ms=5000)])
+    calls = []
+    dlg = VoiceManagerDialog(stub_context)
+    qtbot.addWidget(dlg)
+    dlg.edit_voice = lambda: calls.append(1)
+    assert dlg.list.count() == 1
+    dlg.list.itemDoubleClicked.emit(dlg.list.item(0))
+    assert calls == [1]
