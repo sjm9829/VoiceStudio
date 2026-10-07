@@ -140,6 +140,35 @@ def test_c_profile_roundtrip_in_new_model_instance(tmp_path):
     _assert_sane_pcm(pcm2)
 
 
+def _roundtrip_child_code(src: str, rvh: str, root: str, uuid: str, model: str, gen: str) -> str:
+    """새 프로세스에서 실행할 roundtrip bootstrap code를 생성한다.
+
+    parent-only helper(_validation_ffmpeg_adapter 등)를 참조하지 않고,
+    validation helper는 file-loaded module(m)을 통해 사용한다.
+    """
+    return (
+        "import sys; sys.path.insert(0, r'{src}');\n"
+        "import numpy as np;\n"
+        "import importlib.util as ilu;\n"
+        "vs = ilu.spec_from_file_location('rvh', r'{rvh}'); m = ilu.module_from_spec(vs); vs.loader.exec_module(m);\n"
+        "from voice_studio.infra.profile_repository import ProfileRepository;\n"
+        "from voice_studio.infra.qwen_adapter import RealQwenAdapter, production_device;\n"
+        "from voice_studio.services.audio_service import AudioService;\n"
+        "from voice_studio.services.profile_service import ProfileService;\n"
+        "repo = ProfileRepository(r'{root}');\n"
+        "service = ProfileService(repo, AudioService(m.make_validation_adapter()));\n"
+        "spec = service.load_prompt_spec('{uuid}');\n"
+        "assert spec.ref_code is not None and spec.ref_spk_embedding is not None;\n"
+        "assert spec.ref_text;\n"
+        "adapter = RealQwenAdapter(model_path=r'{model}', device=production_device());\n"
+        "pcm = adapter.generate(spec, {gen!r}, 24000);\n"
+        "assert isinstance(pcm, np.ndarray) and pcm.ndim == 1 and pcm.dtype == np.float32;\n"
+        "assert pcm.size > 0 and np.isfinite(pcm).all();\n"
+        "assert float(np.abs(pcm).max()) > 1e-4;\n"
+        "print('GPU_ROUNDTRIP_OK')\n"
+    ).format(src=src, rvh=rvh, root=root, uuid=uuid, model=model, gen=gen)
+
+
 @gpu
 def test_d_profile_roundtrip_in_new_process(tmp_path):
     """D. 저장된 프로필을 완전히 새 프로세스에서: load → RealQwenAdapter → generate → PCM sanity."""
@@ -168,29 +197,10 @@ def test_d_profile_roundtrip_in_new_process(tmp_path):
 
     root = Path(__file__).resolve().parents[1]
     # 새 프로세스에서: 프로필 load → RealQwenAdapter 로드 → generate → PCM sanity까지 실제 수행.
-    code = (
-        "import sys; sys.path.insert(0, r'{src}');\n"
-        "import numpy as np;\n"
-        
-        "import importlib.util as ilu;\n"
-        "vs = ilu.spec_from_file_location('rvh', r'{rvh}'); m = ilu.module_from_spec(vs); vs.loader.exec_module(m);\n"
-        "from voice_studio.infra.profile_repository import ProfileRepository;\n"
-        "from voice_studio.infra.qwen_adapter import RealQwenAdapter, production_device;\n"
-        "from voice_studio.services.audio_service import AudioService;\n"
-        "from voice_studio.services.profile_service import ProfileService;\n"
-        "repo = ProfileRepository(r'{root}');\n"
-        "service = ProfileService(repo, AudioService(_validation_ffmpeg_adapter()));\n"
-        "spec = service.load_prompt_spec('{uuid}');\n"
-        "assert spec.ref_code is not None and spec.ref_spk_embedding is not None;\n"
-        "assert spec.ref_text;\n"
-        "adapter = RealQwenAdapter(model_path=r'{model}', device=production_device());\n"
-        "pcm = adapter.generate(spec, {gen!r}, 24000);\n"
-        "assert isinstance(pcm, np.ndarray) and pcm.ndim == 1 and pcm.dtype == np.float32;\n"
-        "assert pcm.size > 0 and np.isfinite(pcm).all();\n"
-        "assert float(np.abs(pcm).max()) > 1e-4;\n"
-        "print('GPU_ROUNDTRIP_OK')\n"
-    ).format(src=str(root / "src"), rvh=str(root / "scripts" / "runtime_validation_helpers.py"),
-             root=str(profiles_root), uuid=uuid, model=_model_path(), gen=GEN_TEXT)
+    code = _roundtrip_child_code(
+        src=str(root / "src"),
+        rvh=str(root / "scripts" / "runtime_validation_helpers.py"),
+        root=str(profiles_root), uuid=uuid, model=_model_path(), gen=GEN_TEXT)
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=900)
     assert "GPU_ROUNDTRIP_OK" in r.stdout, r.stderr
 

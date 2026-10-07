@@ -125,3 +125,24 @@ def test_jsonl_buffer_lives_in_linebuffer_module():
     from voice_studio.workers.linebuffer import JsonlBuffer
     import voice_studio.workers.protocol as protocol
     assert not hasattr(protocol, "JsonlBuffer") or protocol.JsonlBuffer is JsonlBuffer
+
+
+def test_gpu_real_child_code_uses_module_scoped_validation_adapter():
+    """test_d child process code는 parent-only helper(_validation_ffmpeg_adapter)를
+    참조하면 NameError가 나므로, file-loaded module(m.make_validation_adapter)만 사용한다."""
+    import test_gpu_real as tgr
+    code = tgr._roundtrip_child_code(
+        src=str(ROOT / "src"),
+        rvh=str(ROOT / "scripts" / "runtime_validation_helpers.py"),
+        root=str(ROOT / "tmp-profiles"), uuid="u", model="m", gen="g")
+    assert "_validation_ffmpeg_adapter" not in code
+    assert "m.make_validation_adapter()" in code
+    # GPU/torch 없이도 compile(구문/이름 바인딩 경계)이 성공해야 한다.
+    compile(code, "<roundtrip-child>", "exec")
+
+
+def test_gpu_real_child_code_prints_roundtrip_marker():
+    import test_gpu_real as tgr
+    code = tgr._roundtrip_child_code(
+        src="s", rvh="r", root="p", uuid="u", model="m", gen="g")
+    assert "GPU_ROUNDTRIP_OK" in code

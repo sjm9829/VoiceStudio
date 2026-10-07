@@ -2,27 +2,28 @@
 REM P13 runtime GPU validation gate (Windows, RTX GPU machine only).
 REM Usage:
 REM   scripts\validate_runtime_gpu_windows.bat --audio "<user audio>" --ref-text "..." --generate-text "..."
-REM Optional passthrough: --skip-stt, --model-dir, --app-exe.
+REM --app-exe is never passed by the user: frozen E2E always uses
+REM dist\VoiceStudio\VoiceStudio.exe. Passing --app-exe here is rejected.
+REM Optional passthrough: --skip-stt, --model-dir.
 REM Source E2E and frozen E2E both run: source success does not prove the
 REM PyInstaller bundled runtime (P13 section 22).
 setlocal
 cd /d "%~dp0.."
 
-REM Split user args: SOURCE_ARGS must never contain --app-exe, FROZEN_ARGS keeps it.
+REM Split user args: --app-exe is rejected because frozen E2E always uses
+REM dist\VoiceStudio\VoiceStudio.exe, so a duplicate --app-exe cannot appear.
 set "SOURCE_ARGS="
 set "FROZEN_ARGS="
 :parse_args
 if "%~1"=="" goto :args_done
-if /i "%~1"=="--app-exe" goto :take_appexe
+if /i "%~1"=="--app-exe" goto :reject_appexe
 set "SOURCE_ARGS=%SOURCE_ARGS% %1"
 set "FROZEN_ARGS=%FROZEN_ARGS% %1"
 shift
 goto :parse_args
-:take_appexe
-set "FROZEN_ARGS=%FROZEN_ARGS% %1 %~2"
-shift
-shift
-goto :parse_args
+:reject_appexe
+echo [FAIL] do not pass --app-exe; frozen E2E always uses dist\VoiceStudio\VoiceStudio.exe.
+goto :err
 :args_done
 
 echo === P13 runtime GPU validation ===
