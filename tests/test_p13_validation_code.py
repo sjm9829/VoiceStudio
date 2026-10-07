@@ -320,3 +320,92 @@ def test_e2e_encode_reference_wav_rejects_non_mono_or_wrong_rate(tmp_path):
     except SystemExit as exc:  # fail()는 sys.exit(1)
         rc = exc.code
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# P13 Source E2E worker env injection (validation-only, production unchanged)
+# ---------------------------------------------------------------------------
+
+def _make_bin_pair(tmp_path):
+    (tmp_path / "ffmpeg.exe").write_bytes(b"x")
+    (tmp_path / "ffprobe.exe").write_bytes(b"y")
+    return tmp_path
+
+
+def test_worker_env_source_injects_repo_bin_at_path_front(tmp_path):
+    """A/B: source worker env는 repo third_party/bin을 PATH 선두에 두고 기존 PATH를 뒤에 유지한다."""
+    import os
+    mod = _load_e2e_module()
+    bin_dir = _make_bin_pair(tmp_path)
+    env = mod._worker_env("", bin_dir=bin_dir)
+    assert isinstance(env, dict)
+    parts = env["PATH"].split(os.pathsep)
+    assert parts[0] == str(bin_dir)  # A: repo bin 선두
+    rest = os.pathsep.join(parts[1:])
+    base = os.environ.get("PATH", "")
+    assert rest == base  # B: 기존 PATH 내용 뒤에 그대로 유지
+    # VOICE_STUDIO_DATA_DIR 격리는 os.environ copy에 포함돼 child로 상속되어야 한다.
+    if "VOICE_STUDIO_DATA_DIR" in os.environ:
+        assert env.get("VOICE_STUDIO_DATA_DIR") == os.environ["VOICE_STUDIO_DATA_DIR"]
+
+
+def test_worker_env_frozen_mode_no_repo_injection():
+    """C: frozen(app_exe 존재)에서는 repo third_party/bin PATH 주입 없이 None(무변경 상속)."""
+    mod = _load_e2e_module()
+    assert mod._worker_env(r"D:\VoiceStudio\VoiceStudio.exe") is None
+
+
+def test_worker_env_source_missing_pair_fails_clearly(tmp_path):
+    """D: ffmpeg.exe/ffprobe.exe pair가 없으면 source validation은 SystemExit(1)로 명확히 실패."""
+    mod = _load_e2e_module()
+    empty = tmp_path  # pair 없음
+    with __import__("pytest").raises(SystemExit) as exc:
+        mod._worker_env("", bin_dir=empty)
+    assert exc.value.code == 1
+
+
+def test_worker_env_register_and_narrate_share_same_env(tmp_path):
+    """E: register/narrate 두 worker subprocess 모두 env=_worker_env(args.app_exe)를 사용한다.
+
+    AST로 subprocess.run 호출을 검사해 _worker_cmd 기반 호출이 모두 _worker_env env를
+    받는지 확인한다(frozen STT smoke는 None이라 별도). register/narrate 2개를 요구.
+    """
+    import ast
+    tree = ast.parse(_e2e_source())
+    worker_runs = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (isinstance(fn, ast.Attribute) and fn.attr == "run"
+                and isinstance(fn.value, ast.Name) and fn.value.id == "subprocess"):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Call):
+            continue
+        cmd = node.args[0]
+        if not (isinstance(cmd.func, ast.Name) and cmd.func.id == "_worker_cmd"):
+            continue
+        kw = {k.arg: k.value for k in node.keywords}
+        assert "env" in kw, "register/narrate subprocess에 env가 있어야 한다"
+        envcall = kw["env"]
+        assert isinstance(envcall, ast.Call) and isinstance(envcall.func, ast.Name)
+        assert envcall.func.id == "_worker_env"
+        worker_runs += 1
+    assert worker_runs == 2, f"register/narrate 2개 worker subprocess 기대: {worker_runs}"
+
+
+def test_production_unchanged_by_this_commit():
+    """F: production worker_main.py / ffmpeg_adapter.py는 이 정정에서 무변경(계약 유지)."""
+    wm = (ROOT / "src" / "voice_studio" / "workers" / "worker_main.py").read_text(encoding="utf-8")
+    fa = (ROOT / "src" / "voice_studio" / "infra" / "ffmpeg_adapter.py").read_text(encoding="utf-8")
+    # production 계약 그대로: 2-인자 AudioService wrapper, RealFfmpegAdapter() 무인자 생성.
+    assert "AudioService(RealFfmpegAdapter())" in wm
+    assert "def encode_wav(self, pcm: np.ndarray, sample_rate: int, out_path: str)" in fa
+    # HEAD(이 정정 커밋) name-only에 production 파일이 없어야 한다.
+    import subprocess as sp
+    r = sp.run(["git", "show", "--name-only", "--format=", "HEAD"],
+               cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
+    names = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+    for prod in ("src/voice_studio/workers/worker_main.py",
+                 "src/voice_studio/infra/ffmpeg_adapter.py"):
+        assert prod not in names, f"{prod}가 이 커밋에서 변경됨: {names}"

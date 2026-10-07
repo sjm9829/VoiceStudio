@@ -52,6 +52,36 @@ def _worker_cmd(app_exe: str, job_path: Path) -> list[str]:
     return [sys.executable, "-m", "voice_studio.main", "--worker", str(job_path)]
 
 
+def _worker_env(app_exe: str, bin_dir: "Path | None" = None) -> "dict[str, str] | None":
+    """source worker child에만 repository third_party/bin을 PATH 선두로 주입한다.
+
+    - source mode(app_exe가 비어 있음): 검증된 repository third_party/bin을 PATH
+      앞에 붙인 child env copy를 반환한다. 시스템 PATH에 의존하는 것이 아니라
+      validation harness가 검증한 repo 경로를 child에 명시적으로 노출한다.
+    - frozen mode(app_exe 존재): None를 반환해 env를 무변경 상속한다. repo PATH를
+      넣으면 packaged bundled FFmpeg 누락이 PATH fallback으로 숨어 거짓 양성이 된다.
+    - global os.environ는 변경하지 않고 child env copy만 만든다. 이 스크립트는
+      frozen E2E에도 쓰이므로 전역 PATH 오염을 피한다. VOICE_STUDIO_DATA_DIR는
+      copy에 이미 포함되므로 temp 데이터 격리는 그대로 child에 상속된다.
+    """
+    if app_exe:
+        return None
+    import os
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location(
+        "runtime_validation_helpers", ROOT / "scripts" / "runtime_validation_helpers.py")
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    target = bin_dir if bin_dir is not None else _mod.REPO_BIN_DIR
+    try:
+        _mod.validation_ffmpeg_paths(target)
+    except _mod.ValidationFfmpegMissing as exc:
+        fail(str(exc))
+    env = os.environ.copy()
+    env["PATH"] = str(target) + os.pathsep + env.get("PATH", "")
+    return env
+
+
 def _isolate_data_root() -> Path:
     """E2E 전용 데이터 루트로 격리한다. 실제 사용자 profiles는 건드리지 않는다.
 
@@ -172,7 +202,8 @@ def main() -> int:
         step("run register worker process")
         r = subprocess.run(_worker_cmd(args.app_exe, job_path),
                            capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=1200)
+                           errors="replace", timeout=1200,
+                           env=_worker_env(args.app_exe))
         events = read_events(r.stdout)
         kinds = [e.get("kind") for e in events]
         print(f"      exit={r.returncode} events={kinds}")
@@ -221,7 +252,8 @@ def main() -> int:
             step("STT smoke via frozen app (VoiceStudio.exe --stt-smoke)")
             r_stt = subprocess.run(_stt_smoke_cmd(args.app_exe, str(src_audio), start_s, end_s),
                                    capture_output=True, text=True, encoding="utf-8",
-                                   errors="replace", timeout=1200)
+                                   errors="replace", timeout=1200,
+                                   env=_worker_env(args.app_exe))
             print(f"      exit={r_stt.returncode}")
             if r_stt.returncode != 0:
                 fail(f"frozen STT smoke failed: {(r_stt.stderr or '')[-500:]}")
@@ -251,7 +283,8 @@ def main() -> int:
         step("run narrate worker process")
         r2 = subprocess.run(_worker_cmd(args.app_exe, njob_path),
                             capture_output=True, text=True, encoding="utf-8",
-                            errors="replace", timeout=1200)
+                            errors="replace", timeout=1200,
+                            env=_worker_env(args.app_exe))
         events2 = read_events(r2.stdout)
         kinds2 = [e.get("kind") for e in events2]
         print(f"      exit={r2.returncode} events={kinds2}")
