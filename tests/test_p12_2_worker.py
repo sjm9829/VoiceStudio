@@ -11,6 +11,12 @@ from voice_studio.infra.qwen_adapter import preferred_dtype, RealQwenAdapter
 from voice_studio.workers.worker_main import _require_model_path, _release_gpu
 
 
+def _inject_fake_qwen_tts(monkeypatch, fake_model):
+    module = types.ModuleType("qwen_tts")
+    module.Qwen3TTSModel = fake_model
+    monkeypatch.setitem(sys.modules, "qwen_tts", module)
+
+
 def test_dtype_policy_fp16_for_turing(monkeypatch):
     """P12.2-10: RTX 2070 SUPER(CC 7.5) 기본 dtype은 torch.float16."""
     monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda *a, **k: False)
