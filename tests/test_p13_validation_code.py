@@ -213,3 +213,110 @@ def test_gpu_real_child_code_prints_roundtrip_marker():
     code = tgr._roundtrip_child_code(
         src="s", rvh="r", root="p", uuid="u", model="m", gen="g")
     assert "GPU_ROUNDTRIP_OK" in code
+
+
+def _load_e2e_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "p13_runtime_e2e", ROOT / "scripts" / "p13_runtime_e2e.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class _RecordingEncodeWavAdapter:
+    """RealFfmpegAdapter.encode_wav(pcm, sample_rate, out_path) 3-인자 계약만 받는 fake."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def encode_wav(self, pcm, sample_rate, out_path):
+        self.calls.append((sample_rate, out_path))
+        import wave
+        with wave.open(out_path, "wb") as fh:
+            fh.setnchannels(1)
+            fh.setsampwidth(2)
+            fh.setframerate(int(sample_rate))
+            fh.writeframes(pcm.astype("<i2").tobytes())
+        return out_path
+
+    def probe(self, path):
+        import wave
+        with wave.open(path, "rb") as fh:
+            return {"duration": fh.getnframes() / fh.getframerate(),
+                    "format_name": "wav", "sample_rate": fh.getframerate(),
+                    "channels": fh.getnchannels(), "codec": "pcm_s16le"}
+
+
+def test_e2e_encode_wav_ast_contract_is_three_positional_args():
+    """AST 정적 계약: E2E의 encode_wav 호출은 3-인자이고 2번째가 sample_rate다."""
+    import ast
+    tree = ast.parse(_e2e_source())
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "encode_wav"]
+    assert calls, "p13_runtime_e2e.py에 encode_wav 호출이 있어야 한다"
+    for call in calls:
+        assert len(call.args) == 3, f"encode_wav는 (pcm, sample_rate, out_path) 3-인자: {ast.dump(call)}"
+        assert not call.keywords
+        second = call.args[1]
+        assert isinstance(second, ast.Attribute) and second.attr == "REFERENCE_SAMPLE_RATE", \
+            "2번째 인자는 config.REFERENCE_SAMPLE_RATE여야 한다(magic number 금지)"
+    # 2-인자 회귀 방지: 소스에 "encode_wav(pcm, str(" 형태가 없어야 한다.
+    assert "encode_wav(pcm, str(" not in _e2e_source()
+
+
+def test_e2e_encode_reference_wav_matches_production_adapter_signature():
+    """production RealFfmpegAdapter 시그니처와 E2E 호출 인자 수가 일치해야 한다."""
+    import inspect
+    from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter
+
+    params = list(inspect.signature(RealFfmpegAdapter.encode_wav).parameters)
+    assert params == ["self", "pcm", "sample_rate", "out_path"]
+
+    import numpy as np
+    mod = _load_e2e_module()
+    fake = _RecordingEncodeWavAdapter()
+    out = tmp_path = None
+    import tempfile
+    tmp_dir = Path(tempfile.mkdtemp(prefix="p13_encode_wav_"))
+    out = tmp_dir / "reference.wav"
+    probe = mod.encode_reference_wav(fake, np.zeros(240, dtype=np.float32), out)
+    assert len(fake.calls) == 1
+    assert fake.calls[0][0] == 24000  # config.REFERENCE_SAMPLE_RATE
+    assert fake.calls[0][1] == str(out)
+    assert probe["sample_rate"] == 24000 and probe["channels"] == 1
+    assert out.stat().st_size > 0
+
+
+def test_e2e_encode_reference_wav_fails_on_two_arg_call(tmp_path):
+    """2-인자 호출로 되돌아가면 fake/real 계약 모두 TypeError로 실패해야 한다."""
+    import numpy as np
+    mod = _load_e2e_module()
+    fake = _RecordingEncodeWavAdapter()
+    out = tmp_path / "reference.wav"
+    # 정적 AST 검사로 이미 3-인자를 보증하지만, 런타임 경계도 확인한다.
+    probe = mod.encode_reference_wav(fake, np.zeros(240, dtype=np.float32), out)
+    assert probe["channels"] == 1
+    # 2-인자 형태는 production adapter 시그니처와 불일치 → TypeError.
+    with __import__("pytest").raises(TypeError):
+        fake.encode_wav(np.zeros(4, dtype=np.float32), str(out))
+
+
+def test_e2e_encode_reference_wav_rejects_non_mono_or_wrong_rate(tmp_path):
+    """probe 결과가 mono/24kHz가 아니면 fail()로 exit 1해야 한다."""
+    import numpy as np
+    mod = _load_e2e_module()
+
+    class _WrongProbe(_RecordingEncodeWavAdapter):
+        def probe(self, path):
+            return {"duration": 1.0, "format_name": "wav", "sample_rate": 48000,
+                    "channels": 2, "codec": "pcm_s16le"}
+
+    out = tmp_path / "reference.wav"
+    rc = None
+    try:
+        mod.encode_reference_wav(_WrongProbe(), np.zeros(240, dtype=np.float32), out)
+    except SystemExit as exc:  # fail()는 sys.exit(1)
+        rc = exc.code
+    assert rc == 1

@@ -68,6 +68,27 @@ def _isolate_data_root() -> Path:
     return tmp_root
 
 
+def encode_reference_wav(audio, pcm, ref_wav: Path) -> dict:
+    """reference.wav를 adapter 계약대로 인코딩하고 validation artifact를 확인한다.
+
+    RealFfmpegAdapter.encode_wav(pcm, sample_rate, out_path)의 3-인자 계약을
+    사용한다(AudioService의 2-인자 wrapper와 혼동하지 말 것). 이 WAV는 E2E
+    validation artifact일 뿐이며 production register worker 입력 구조와 무관하다.
+    """
+    from voice_studio.core import config
+
+    audio.encode_wav(pcm, config.REFERENCE_SAMPLE_RATE, str(ref_wav))
+    wav_path = Path(ref_wav)
+    if not wav_path.is_file() or wav_path.stat().st_size == 0:
+        fail(f"reference.wav missing/empty: {wav_path}")
+    probe = audio.probe(str(wav_path))
+    if int(probe.get("sample_rate", 0)) != config.REFERENCE_SAMPLE_RATE:
+        fail(f"reference.wav sample_rate mismatch: {probe}")
+    if int(probe.get("channels", 0)) != 1:
+        fail(f"reference.wav is not mono: {probe}")
+    return probe
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--audio", required=True, help="사용자 참조 오디오 파일(한글 경로 가능)")
@@ -88,6 +109,7 @@ def main() -> int:
     _mod = _ilu.module_from_spec(_spec)
     _spec.loader.exec_module(_mod)
     audio = _mod.make_validation_adapter()  # third_party/bin 고정(PATH 비의존)
+    from voice_studio.core import config
     from voice_studio.infra.profile_repository import ProfileRepository
     from voice_studio.services.audio_service import AudioService
     from voice_studio.services.model_manager import ModelManager
@@ -120,14 +142,17 @@ def main() -> int:
         # 4 구간 선택/디코딩
         start_s, end_s = 0.0, min(6.0, duration)
         step(f"decode segment {start_s:.1f}-{end_s:.1f}s")
-        pcm = audio.decode_segment(str(src_audio), start_s, end_s, 24000)
+        pcm = audio.decode_segment(str(src_audio), start_s, end_s, config.REFERENCE_SAMPLE_RATE)
         if pcm.dtype != __import__("numpy").float32 or pcm.ndim != 1 or pcm.size == 0:
             fail("decoded PCM sanity failed")
 
-        # 5 WAV 인코딩
+        # 5 WAV 인코딩 + validation artifact 확인
         step("encode reference wav")
         ref_wav = tmp_work / "reference.wav"
-        audio.encode_wav(pcm, str(ref_wav))
+        ref_probe = encode_reference_wav(audio, pcm, ref_wav)
+        print(f"      reference.wav sr={int(ref_probe['sample_rate'])} "
+              f"channels={int(ref_probe['channels'])} "
+              f"size={ref_wav.stat().st_size}B")
 
         # 6 job 준비(register). profiles root는 temp 격리 + unique 이름.
         step("prepare register job (temp profile root, unique name)")
@@ -204,7 +229,7 @@ def main() -> int:
             step("STT transcribe (source faster-whisper small/int8)")
             try:
                 from voice_studio.services.transcription_service import FasterWhisperTranscriber
-                text = FasterWhisperTranscriber().transcribe(pcm, 24000)
+                text = FasterWhisperTranscriber().transcribe(pcm, config.REFERENCE_SAMPLE_RATE)
             except Exception as exc:
                 fail(f"STT load/transcribe failed: {type(exc).__name__}: {exc}")
             print(f"      stt_text={text!r}")
