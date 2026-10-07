@@ -215,14 +215,12 @@ def test_emit_survives_cp949_stdout():
 
 
 def test_jsonl_buffer_partial_chunks():
-    """stdout이 QProcess 청크로 잘려 와도 json.loads는 이벤트 단위로 복원된다."""
-    from voice_studio.workers.protocol import emit, status_event
+    """stdout이 QProcess 청크로 잘려 와도 JsonlBuffer(workers.linebuffer)가 이벤트 단위로 복원한다."""
     from voice_studio.workers.linebuffer import JsonlBuffer
-    if not hasattr(__import__("voice_studio.workers.protocol", fromlist=["JsonlBuffer"]), "JsonlBuffer"):
-        pytest.skip("JsonlBuffer 미제공")
+    from voice_studio.workers.protocol import status_event
     buf = JsonlBuffer()
-    ev1, ev2 = status_event("model_loading", job_id="j"), status_event("saving_profile", job_id="j")
-    emit(ev1)
+    ev1 = status_event("model_loading", job_id="j")
+    ev2 = status_event("saving_profile", job_id="j")
     line1 = json.dumps(ev1, ensure_ascii=True) + "\n"
     line2 = json.dumps(ev2, ensure_ascii=True) + "\n"
     payload = (line1 + line2).encode("ascii")
@@ -232,32 +230,77 @@ def test_jsonl_buffer_partial_chunks():
 
 
 # ---------------------------------------------------------------- ffmpeg
-def test_ffprobe_decode_utf8_and_limited_entries(monkeypatch):
+def _probe_adapter(monkeypatch, stdout, returncode=0):
     from voice_studio.infra import ffmpeg_adapter
     calls = {}
 
     def fake_run(args, **kw):
         calls["args"] = args
         calls["kw"] = kw
-        calls["called"] = True
-        out = ("{'format': {}}").encode("utf-8")  # 유니코드 디코딩 경로 확인용
-        return types.SimpleNamespace(returncode=0, stdout="한글경로 응답", stderr="", args=args)
+        return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
 
     monkeypatch.setattr(ffmpeg_adapter.subprocess, "run", fake_run)
     adapter = ffmpeg_adapter.RealFfmpegAdapter.__new__(ffmpeg_adapter.RealFfmpegAdapter)
     adapter.ffmpeg = "ffmpeg"
     adapter.ffprobe = "ffprobe"
-    try:
-        adapter.probe("sample.m4a")
-    except Exception:
-        pass  # json 파싱 결과는 환경별로 다를 수 있음 — 호출 계약만 검증
-    assert calls["called"]
+    return adapter, calls
+
+
+_VALID_FFPROBE_JSON = json.dumps({
+    "format": {"duration": "12.345", "format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+    "streams": [{"codec_type": "audio", "codec_name": "aac", "duration": "12.345",
+                 "sample_rate": "44100", "channels": 2}],
+})
+
+
+def test_ffprobe_valid_json_returns_flat_contract(monkeypatch):
+    """유효한 ffprobe JSON은 flat contract dict를 정확히 반환한다(예외 허용 금지)."""
+    adapter, calls = _probe_adapter(monkeypatch, _VALID_FFPROBE_JSON)
+    result = adapter.probe("sample.m4a")
+    assert result == {
+        "duration": 12.345,
+        "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+        "sample_rate": 44100,
+        "channels": 2,
+        "codec": "aac",
+    }
     assert calls["kw"].get("encoding") == "utf-8"
     assert calls["kw"].get("errors") == "replace"
     entries = " ".join(str(a) for a in calls["args"])
     assert "-show_entries" in entries
     assert "format_name" in entries and "duration" in entries
     assert "tags" not in entries  # 제한된 entries
+
+
+def test_ffprobe_utf8_text_survives(monkeypatch):
+    """stdout이 임의 유니코드 텍스트여도 UTF-8/replace로 안전히 파싱 경로를 유지한다."""
+    adapter, calls = _probe_adapter(monkeypatch, _VALID_FFPROBE_JSON)
+    result = adapter.probe("sample.m4a")
+    assert result["duration"] == 12.345
+
+
+def test_ffprobe_invalid_json_raises_unsupported_audio(monkeypatch):
+    """ffprobe stdout이 JSON이 아니면 정확히 UnsupportedAudioError만 발생한다."""
+    from voice_studio.core.errors import UnsupportedAudioError
+    adapter, _ = _probe_adapter(monkeypatch, "not json at all")
+    with pytest.raises(UnsupportedAudioError):
+        adapter.probe("sample.m4a")
+
+
+def test_ffprobe_failure_returncode_raises_unsupported_audio(monkeypatch):
+    from voice_studio.core.errors import UnsupportedAudioError
+    adapter, _ = _probe_adapter(monkeypatch, "{}", returncode=1)
+    with pytest.raises(UnsupportedAudioError):
+        adapter.probe("sample.m4a")
+
+
+def test_ffprobe_no_audio_stream_raises(monkeypatch):
+    from voice_studio.core.errors import UnsupportedAudioError
+    adapter, _ = _probe_adapter(monkeypatch, json.dumps({
+        "format": {"duration": "3.0", "format_name": "mp3"},
+        "streams": [{"codec_type": "video"}]}))
+    with pytest.raises(UnsupportedAudioError):
+        adapter.probe("sample.mp3")
 
 
 def test_ffmpeg_run_uses_utf8_decode(monkeypatch):
@@ -428,12 +471,17 @@ def test_segmenter_hard_max_respected():
 
 # ---------------------------------------------------------------- version source
 def test_version_single_source():
+    """pyproject / installer .iss / src/voice_studio/__init__.py 세 곳 모두 동일 버전."""
     root = Path(__file__).resolve().parents[1]
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     iss = (root / "installer" / "voice-studio.iss").read_text(encoding="utf-8", errors="replace")
+    pkg_init = (root / "src" / "voice_studio" / "__init__.py").read_text(encoding="utf-8")
     import re as _re
     m = _re.search(r'^version\s*=\s*"([^"]+)"', pyproject, _re.M)
     assert m, "pyproject version not found"
     version = m.group(1)
     mi = _re.search(r'MyAppVersion\s+"([^"]+)"', iss)
     assert mi and mi.group(1) == version
+    mpkg = _re.search(r'__version__\s*=\s*"([^"]+)"', pkg_init)
+    assert mpkg and mpkg.group(1) == version
+    assert version == "0.1.1"

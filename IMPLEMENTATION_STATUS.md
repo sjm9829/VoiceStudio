@@ -56,9 +56,43 @@ Validation — 미검증` 섹션대로 미검증 상태이며, 이 섹션은 코
 - `scripts/validate_runtime_gpu_windows.bat`(신규): 실기 RTX 검증 전용
   (조합 기록 → check_cuda → 실제 GPU pytest → 실기 E2E). 기존
   `validate_gpu_windows.bat`/`smoke_frozen.bat`는 import/existence 게이트로 유지.
-- `scripts/p13_runtime_e2e.py`(신규): 23단계 실기 E2E
+- `scripts/p13_runtime_e2e.py`(신규, self-review 재작성): 15단계 실기 E2E
   (--audio/--ref-text/--generate-text만 인자; 사용자 파일을 저장소로 복사하지 않음;
   register/narrate worker를 실제 프로세스 경계에서 실행).
+
+### 검증 코드 self-review 수정(2026-10-06, stabilization correction)
+- `scripts/p13_runtime_e2e.py` 재작성: ffmpeg_adapter에서의 존재하지 않는 `production_device`
+  import 제거(qwen_adapter 전용), ffprobe flat contract(`probe["duration"]`/`probe["format_name"]`,
+  `probe["format"]` 제거), `ProfileService.load_prompt_spec` 공식 경로 사용
+  (ProfileRepository 직접 호출 제거), narrate 결과를 `protocol.result_event` 계약인
+  `output_path` 키로 확인(`res2["path"]` 제거).
+- 모델 경로 탐색: `ModelManager().model_path()` 계약 우선(HF 캐시만 탐색하던 코드는
+  fallback). 사용자가 앱에서 이미 받은 모델을 재다운로드하지 않는다. `--model-dir` override 유지.
+- E2E profile 격리: temp 데이터 루트(Windows는 LOCALAPPDATA 격리, 비-Windows는
+  VOICE_STUDIO_DATA_DIR 격리) + unique profile 이름(`P13 E2E <uuid8>`). 실제 사용자
+  profiles는 변경하지 않고 종료 후 temp를 삭제한다.
+- STT 단계 추가: reference PCM → `FasterWhisperTranscriber`(small/int8, 24k→16k 내부 리샘플).
+  기본 실행, `--skip-stt` opt-out. load/transcribe 예외 시 E2E 실패 처리.
+- frozen worker 지원: `--app-exe "...\VoiceStudio.exe"`가 주어지면 register/narrate 모두
+  frozen exe `--worker`로 실행, 없으면 source 모드(`python -m voice_studio.main --worker`).
+- `scripts/validate_runtime_gpu_windows.bat` 실제 생성(기존에는 문서에만 기록되어 tree에 없었음).
+  ASCII-only, 조합 기록 → check_cuda → GPU pytest(`-m gpu`) → E2E(%* 인자 전달,
+  사용자 audio/ref-text hardcode 없음). 성공 시 `GPU_VALIDATION_OK`.
+- `infra/ffmpeg_adapter.py`: `from excxc` 오타 → `from exc`.
+- 버전 단일 소스 3곳 일치: pyproject 0.1.1 / installer MyAppVersion 0.1.1 /
+  `src/voice_studio/__init__.py` __version__ 0.1.1.
+- 테스트 품질 정정: `test_jsonl_buffer_partial_chunks`는 protocol 모듈 attribute 검사 skip을
+  제거하고 workers.linebuffer의 실제 JsonlBuffer에 partial ASCII JSONL chunks를 feed해
+  두 이벤트 복원을 반드시 assert. ffprobe 테스트는 `except Exception: pass`를 제거하고
+  유효 JSON fixture의 정확한 flat dict 반환, invalid JSON/returncode!=0/무오디오 스트림에서의
+  정확한 UnsupportedAudioError를 assert(NameError 같은 unexpected 예외는 테스트 실패).
+- 신규: `tests/test_p13_validation_code.py`(E2E 정적 계약 9개, bat 존재/ASCII, 버전 3곳,
+  result_event 계약, JsonlBuffer 위치, excxc 부재 회귀).
+
+#### STT 검증 상태 구분
+- source STT runtime(개발 Linux, faster-whisper small/int8 실측): **passed**
+  (`tests/test_stt_real.py` 2 passed).
+- Windows frozen STT(설치본 console=False 환경): **validation required**(P13 실기에서만 판정).
 
 ### 문서 드리프트 수정(docs/02)
 - "내장 재생 컨트롤" → 시스템 기본 연결 프로그램 재생(os.startfile)으로 정정.

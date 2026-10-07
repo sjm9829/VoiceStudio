@@ -17,15 +17,25 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-torch = pytest.importorskip("torch", reason="torch 미설치 환경")
 gpu = pytest.mark.gpu
+
+
+def _torch():
+    """torch를 지연 import한다(개발 환경에 torch가 없어도 collection은 성공한다)."""
+    import torch
+    return torch
 
 REF_TEXT = "안녕하세요. 참조 음성 테스트 대사입니다."
 GEN_TEXT = "안녕하세요. 실제 GPU 생성 검증 문장입니다."
 
 
 def _cuda_or_skip():
-    if not torch.cuda.is_available():
+    """torch 미설치/CUDA 미보유 모두 SKIP이지만, GPU가 있는 P13 실행에서는 절대 skip하지 않는다."""
+    try:
+        t = _torch()
+    except ImportError:
+        pytest.skip("torch 미설치 환경")
+    if not t.cuda.is_available():
         pytest.skip("CUDA GPU가 없는 환경")
 
 
@@ -77,7 +87,7 @@ def test_b_korean_generate_direct(tmp_path):
     _assert_sane_pcm(pcm)
     del adapter
     import gc
-    gc.collect(); torch.cuda.empty_cache()
+    gc.collect(); _torch().cuda.empty_cache()
 
 
 @gpu
@@ -109,11 +119,12 @@ def test_c_profile_roundtrip_in_new_model_instance(tmp_path):
     del adapter, service, spec
     import gc
     gc.collect()
-    torch.cuda.empty_cache(); torch.cuda.synchronize()
+    _torch().cuda.empty_cache(); _torch().cuda.synchronize()
 
     # 새 모델 인스턴스 + 저장된 프로필 재로드 → 생성
     adapter2 = _adapter()
-    spec2 = repo.load_prompt_spec(uuid)
+    service2 = ProfileService(repo, AudioService(RealFfmpegAdapter()), qwen=adapter2)
+    spec2 = service2.load_prompt_spec(uuid)
     assert spec2.ref_code is not None and spec2.ref_spk_embedding is not None
     pcm2 = adapter2.generate(spec2, GEN_TEXT, 24000)
     _assert_sane_pcm(pcm2)
@@ -121,7 +132,7 @@ def test_c_profile_roundtrip_in_new_model_instance(tmp_path):
 
 @gpu
 def test_d_profile_roundtrip_in_new_process(tmp_path):
-    """D. 저장된 프로필을 완전히 새 프로세스에서 재로드해 VoiceClonePromptSpec 복원."""
+    """D. 저장된 프로필을 완전히 새 프로세스에서: load → RealQwenAdapter → generate → PCM sanity."""
     _cuda_or_skip()
     import wave
     from voice_studio.infra.profile_repository import ProfileRepository
@@ -144,18 +155,32 @@ def test_d_profile_roundtrip_in_new_process(tmp_path):
     uuid = profile.uuid
     del adapter, service, spec
     import gc
-    gc.collect(); torch.cuda.empty_cache()
+    gc.collect(); _torch().cuda.empty_cache()
 
     root = Path(__file__).resolve().parents[1]
+    # 새 프로세스에서: 프로필 load → RealQwenAdapter 로드 → generate → PCM sanity까지 실제 수행.
     code = (
         "import sys; sys.path.insert(0, r'{src}');\n"
+        "import numpy as np;\n"
+        "from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter;\n"
         "from voice_studio.infra.profile_repository import ProfileRepository;\n"
-        "spec = ProfileRepository(r'{root}').load_prompt_spec('{uuid}');\n"
+        "from voice_studio.infra.qwen_adapter import RealQwenAdapter, production_device;\n"
+        "from voice_studio.services.audio_service import AudioService;\n"
+        "from voice_studio.services.profile_service import ProfileService;\n"
+        "repo = ProfileRepository(r'{root}');\n"
+        "service = ProfileService(repo, AudioService(RealFfmpegAdapter()));\n"
+        "spec = service.load_prompt_spec('{uuid}');\n"
         "assert spec.ref_code is not None and spec.ref_spk_embedding is not None;\n"
         "assert spec.ref_text;\n"
+        "adapter = RealQwenAdapter(model_path=r'{model}', device=production_device());\n"
+        "pcm = adapter.generate(spec, {gen!r}, 24000);\n"
+        "assert isinstance(pcm, np.ndarray) and pcm.ndim == 1 and pcm.dtype == np.float32;\n"
+        "assert pcm.size > 0 and np.isfinite(pcm).all();\n"
+        "assert float(np.abs(pcm).max()) > 1e-4;\n"
         "print('GPU_ROUNDTRIP_OK')\n"
-    ).format(src=str(root / "src"), root=str(profiles_root), uuid=uuid)
-    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600)
+    ).format(src=str(root / "src"), root=str(profiles_root), uuid=uuid,
+             model=_model_path(), gen=GEN_TEXT)
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=900)
     assert "GPU_ROUNDTRIP_OK" in r.stdout, r.stderr
 
 
@@ -170,5 +195,6 @@ def test_e_gpu_memory_peak_evidence(tmp_path):
     _assert_sane_pcm(pcm)
     import gc
     gc.collect()
-    torch.cuda.empty_cache(); torch.cuda.synchronize()
-    assert torch.cuda.max_memory_allocated() > 0
+    t = _torch()
+    t.cuda.empty_cache(); t.cuda.synchronize()
+    assert t.cuda.max_memory_allocated() > 0

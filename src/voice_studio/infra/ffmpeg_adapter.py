@@ -123,7 +123,7 @@ class RealFfmpegAdapter:
             data = json.loads(r.stdout)
         except ValueError as exc:
             _log.warning("probe 실패: path=%r ffprobe 출력 파싱 실패: %s", path, exc)
-            raise UnsupportedAudioError("ffprobe 출력을 해석할 수 없습니다.") from excxc
+            raise UnsupportedAudioError("ffprobe 출력을 해석할 수 없습니다.") from exc
         fmt = data.get("format", {})
         audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
         if audio is None:
