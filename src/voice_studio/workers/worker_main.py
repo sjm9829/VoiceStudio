@@ -79,8 +79,8 @@ def run_register(job) -> None:
     emit(status_event("model_loading", job_id=job.job_id))
     model_path = _require_model_path(job)
     repo, audio, service = _make_services(job.profile_dir)
-    from voice_studio.infra.qwen_adapter import RealQwenAdapter, default_device
-    qwen = RealQwenAdapter(model_path=model_path, device=default_device())
+    from voice_studio.infra.qwen_adapter import RealQwenAdapter, production_device
+    qwen = RealQwenAdapter(model_path=model_path, device=production_device())
     emit(status_event("analyzing_reference", job_id=job.job_id))
     pcm = audio.decode_reference_segment(job.source_path, job.start_s, job.end_s)
     spec = qwen.create_prompt(pcm, 24000, job.ref_text.strip())
@@ -97,10 +97,10 @@ def run_narrate(job) -> None:
     model_path = _require_model_path(job)  # P12.3-09: narrate도 HF fallback 금지
     emit(status_event("model_loading", job_id=job.job_id))
     repo, audio, service = _make_services(job.profile_dir)
-    from voice_studio.infra.qwen_adapter import RealQwenAdapter, default_device
+    from voice_studio.infra.qwen_adapter import RealQwenAdapter, production_device
     from voice_studio.services.narration_service import NarrationService
     from voice_studio.domain.generation_job import GenerationJob, JobStatus
-    qwen = RealQwenAdapter(model_path=model_path, device=default_device())
+    qwen = RealQwenAdapter(model_path=model_path, device=production_device())
     narration = NarrationService(qwen, audio, repo)
     # 모델을 이 프로세스에서 1회 로드한 뒤, 전달받은 segments를 순차 생성한다.
     gen_job = GenerationJob(

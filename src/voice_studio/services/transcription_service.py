@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 from typing import Protocol
+import logging, os
 import numpy as np
+
+_log = logging.getLogger(__name__)
 from ..core import config
 
 class Transcriber(Protocol):
@@ -28,10 +31,30 @@ class FasterWhisperTranscriber:
         return self._model is not None
 
     def ensure_loaded(self, progress_cb=None) -> None:
+        """모델 로드/다운로드. 설치본(console=False)에서의 실패를 로그로 진단한다(P13 §12).
+
+        - faster-whisper 모델 다운로드는 huggingface_hub를 거친다. PyInstaller
+          console=False(windowed) 설치본에서 sys.stdout/sys.stderr가 None이면
+          hub의 tqdm 진행바가 'NoneType' object has no attribute 'write'로
+          실패한다. 모델 매니저(P13 hotfix)와 동일하게 진행바를 비활성화한다.
+        - 실패 시 정확한 exception을 traceback째 파일 로그에 기록한 뒤 그대로
+          재raise한다. UI에는 friendly message만 나가고 진단 근거는 로그에 남는다.
+        """
         if self._model is not None:
             return
-        from faster_whisper import WhisperModel  # 지연 import: 메인 프로세스는 GPU/CUDA와 무관
-        self._model = WhisperModel(self.model_id, device="cpu", compute_type=self.compute_type)
+        try:
+            from huggingface_hub.utils import disable_progress_bars
+            disable_progress_bars()
+        except Exception:  # pragma: no cover - 구버전 hub fallback
+            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        _log.info("STT 모델 로드 시작: model=%s compute=%s", self.model_id, self.compute_type)
+        try:
+            from faster_whisper import WhisperModel  # 지연 import: 메인 프로세스는 GPU/CUDA와 무관
+            self._model = WhisperModel(self.model_id, device="cpu", compute_type=self.compute_type)
+        except Exception:
+            _log.exception("STT 모델 로드 실패: model=%s compute=%s", self.model_id, self.compute_type)
+            raise
+        _log.info("STT 모델 로드 완료: model=%s", self.model_id)
 
     def transcribe(self, pcm: np.ndarray, sample_rate: int) -> str:
         """선택 구간 PCM을 받아 텍스트로 변환한다.
@@ -43,7 +66,12 @@ class FasterWhisperTranscriber:
             pcm = pcm.astype(np.float32)
         pcm = _resample_to_16k(pcm, sample_rate)
         self.ensure_loaded()  # 첫 사용 시 모델 다운로드(오프라인이면 오류가 올라간다)
-        segments, _info = self._model.transcribe(pcm, language="ko", beam_size=1)
+        try:
+            segments, _info = self._model.transcribe(pcm, language="ko", beam_size=1)
+        except Exception:
+            _log.exception("STT transcribe 실패: model=%s sample_rate_in=%s pcm=%s",
+                           self.model_id, sample_rate, pcm.shape)
+            raise
         return " ".join(seg.text.strip() for seg in segments).strip()
 
 def _resample_to_16k(pcm: np.ndarray, sample_rate: int) -> np.ndarray:

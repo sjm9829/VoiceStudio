@@ -8,6 +8,8 @@ worker 실행 계약:
 """
 
 from __future__ import annotations
+import datetime
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, Q
                                QPushButton, QPlainTextEdit, QLabel, QFileDialog, QMessageBox,
                                QProgressBar)
 from ..core.errors import VoiceStudioError, ProfileError, ModelNotDownloadedError
+from ..core.paths import logs_dir
 from ..workers.job_schema import build_narrate_payload
 from ..workers.launcher import worker_command
 from ..core.paths import safe_job_cache_dir
@@ -182,6 +185,7 @@ class MainWindow(QMainWindow):
             self._job_dir = job_dir
             self._buffer = JsonlBuffer()
             self._stderr_chunks = []
+            self._current_job_id = payload["job_id"]
             self._result_received = False
             program, args = worker_command(str(job_file))
             self._worker = QProcess(self)
@@ -213,6 +217,24 @@ class MainWindow(QMainWindow):
             return
         data = bytes(self._worker.readAllStandardError()).decode("utf-8", "replace")
         self._stderr_chunks.append(data)
+        # P13 §7: stderr를 메모리에만 쌓아두고 버리지 않고 즉시 진단 로그로 flush.
+        self._persist_worker_stderr(data)
+
+    def _persist_worker_stderr(self, text: str) -> None:
+        """worker stderr를 %LOCALAPPDATA%\VoiceStudio\logs\worker-stderr.log에 append한다."""
+        if not text:
+            return
+        logging.getLogger(__name__).warning("narrate worker stderr: %s", text)
+        try:
+            logs_dir().mkdir(parents=True, exist_ok=True)
+            stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            job = getattr(self, "_current_job_id", "") or ""
+            with (logs_dir() / "worker-stderr.log").open("a", encoding="utf-8") as fp:
+                fp.write(f"\n---- {stamp} job={job} mode=narrate ----\n{text}")
+                if not text.endswith("\n"):
+                    fp.write("\n")
+        except OSError:
+            logging.getLogger(__name__).warning("worker-stderr.log 기록 실패", exc_info=True)
 
     def _handle_event(self, ev: dict):
         kind = ev.get("kind")
@@ -240,6 +262,7 @@ class MainWindow(QMainWindow):
                 err = bytes(self._worker.readAllStandardError()).decode("utf-8", "replace")
                 if err:
                     self._stderr_chunks.append(err)
+                    self._persist_worker_stderr(err)
             except Exception:
                 pass
         self.cancel_btn.setVisible(False)
@@ -257,6 +280,8 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText(self.status_label.text() or "작업이 실패했습니다.")
             self._cleanup_job()
+        if hasattr(self._worker, "deleteLater"):
+            self._worker.deleteLater()  # P13 §22: QProcess 객체 정리
         self._worker = None
 
     def _cleanup_job(self, keep_output: bool = False):

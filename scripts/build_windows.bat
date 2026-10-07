@@ -53,6 +53,12 @@ REM on the build machine. Real CUDA/GPU validation runs on the P13 target PC via
 REM scripts\check_cuda.py and the --require-gpu smoke.
 python scripts\check_runtime_packages.py || goto :err
 
+REM P13: non-GPU pytest gate before packaging. gpu/stt markers are opt-in
+REM (real CUDA model / real faster-whisper download) and excluded here.
+set QT_QPA_PLATFORM=offscreen
+python -m pytest -q -m "not gpu and not stt" tests || goto :err
+set QT_QPA_PLATFORM=
+
 pip install pyinstaller || goto :err
 pyinstaller --noconfirm --clean packaging\VoiceStudio.spec || goto :err
 

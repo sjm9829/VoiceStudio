@@ -3,6 +3,74 @@
 ## 현재 Phase
 P01~P11 소스·테스트 1차 구현 완료. P09~P11 일부(설정 UX/통합/패키징 스크립트) 포함, 실기 검증 항목은 미검증.
 
+## P13 Runtime Stabilization (2026-10-06, 코드 레벨 완료 / 실기 GPU 미검증)
+
+정민님의 P13 Runtime Stabilization 지시(원격 push 금지, 커밋만 허용)에 따라 전체 흐름의
+코드 레벨 런타임 blocker를 제거했다. Windows 실기 GPU E2E는 아래 `P13 Windows GPU E2E
+Validation — 미검증` 섹션대로 미검증 상태이며, 이 섹션은 코드·테스트 결과만 기술한다.
+
+### 실기에서 확인된 성공 조합 기록(§28, 하향 금지)
+- Windows + Python 3.12 + torch 2.14.1+cu126 + torchaudio 2.11.0+cu126 + CUDA 12.6:
+  실제 Windows 빌드 로그에서 성공한 조합으로 기록한다. 어떤 패키지도 이보다 낮추지 않는다.
+- RTX 2070 SUPER(CC 7.5)는 FP16 필수(BFloat16 금지). RTX 3080/Ampere는 BF16 허용.
+  프로필 직렬화는 dtype 중립(BF16이어도 float로 변환해 저장 가능).
+
+### 코드 변경(모두 저장됨)
+- `infra/qwen_adapter.py`: `tensor_to_numpy`가 bf16 텐서를 `.float()`로 변환 후 numpy로
+  변환한다(ScalarType BFloat16 TypeError의 근본 수정). dtype 경계는 preferred_dtype
+  강제 변경이 아니라 변환 계층에서 처리한다.
+- `workers/protocol.py`: worker stdout JSONL은 `ensure_ascii=True`로 ASCII 와이어를 유지해
+  Windows 콘솔 코드페이지(CP949)와 무관하게 동작한다(한글 이벤트 mojibake 수정).
+- `infra/ffmpeg_adapter.py`: 모든 텍스트 subprocess는 `encoding="utf-8", errors="replace"`,
+  PCM은 raw bytes로만 전달. ffprobe는 제한된 `-show_entries`만 요청하고 경로는 list argv로 전달.
+  디코드/세그먼트 계약(`-ss start -t duration`) 유지.
+- `infra/qwen_adapter.py`/`workers/worker_main.py`: production worker는 `production_device()`
+  (torch/CUDA 없으면 `GpuUnavailableError`). CPU TTS fallback 금지 계약 유지.
+- `core/logging_setup.py`: FileHandler 항상, StreamHandler는 `sys.stderr is not None`일 때만.
+  console=False 설치본에서 안전. 중복 핸들러 없음, stdout JSONL 오염 없음.
+- `ui/voice_editor_dialog.py`: UI에는 `message`/`user_message`만 노출(`detail`은 로그로).
+  worker stderr를 `logs/worker-stderr.log`에 기록. 실행 중 QThread가 있으면 close 차단.
+- `ui/main_window.py`: narrate worker stderr도 `worker-stderr.log`에 기록. 작업 종료 시
+  QProcess `deleteLater()`로 객체 정리(취소/완료 공통).
+- `services/transcription_service.py`: STT 모델 로드 전 HF 진행바 비활성화(console=False
+  설치본의 hub tqdm NoneType write 문제 예방), 실패 시 정확한 exception을 파일 로그에
+  기록 후 재raise(UI는 friendly message만).
+- `services/text_segmenter.py`: 단락 내 짧은 청크 병합(`_merge_short_chunks`).
+- `pyproject.toml`: 버전 0.1.1로 상향(installer `MyAppVersion`와 단일 소스 일치).
+
+### 테스트(개발 Linux 환경, torch/GPU 없음)
+- 전체 스위트: `QT_QPA_PLATFORM=offscreen uv run pytest -q` →
+  **254 passed / 11 skipped / 0 failed**. gpu/stt 마커는 opt-in이라 SKIP이 정상이며
+  성공으로 위장하지 않는다.
+- 신규: `tests/test_p13_runtime_stabilization.py`(BF16 변환, ASCII JSONL, ffprobe UTF-8
+  계약, stderr=None 로깅, detail 비노출, 세그먼터 병합, 버전 단일 소스),
+  `tests/test_gpu_real.py` 재작성(현재 production API 기준, `pytest -m gpu`),
+  `tests/test_stt_real.py`(실제 faster-whisper small/int8 로드+transcribe, `pytest -m stt`).
+  **STT 실제 런타임 테스트는 개발 환경에서 실제 실행해 통과**(모델 다운로드 포함, 2 passed).
+  GPU 테스트(test_gpu_real.py)는 이 환경에서 미실행(GPU 없음) — Windows 실기에서
+  `python -m pytest -q tests/test_gpu_real.py -m gpu`로 실행해야 한다.
+
+### 빌드/검증 스크립트
+- `scripts/build_windows.bat`: PyInstaller 전에 비-GPU pytest 게이트 추가
+  (`-m "not gpu and not stt"`, offscreen). ASCII-only 유지.
+- `scripts/validate_runtime_gpu_windows.bat`(신규): 실기 RTX 검증 전용
+  (조합 기록 → check_cuda → 실제 GPU pytest → 실기 E2E). 기존
+  `validate_gpu_windows.bat`/`smoke_frozen.bat`는 import/existence 게이트로 유지.
+- `scripts/p13_runtime_e2e.py`(신규): 23단계 실기 E2E
+  (--audio/--ref-text/--generate-text만 인자; 사용자 파일을 저장소로 복사하지 않음;
+  register/narrate worker를 실제 프로세스 경계에서 실행).
+
+### 문서 드리프트 수정(docs/02)
+- "내장 재생 컨트롤" → 시스템 기본 연결 프로그램 재생(os.startfile)으로 정정.
+  QtMultimedia 내장 플레이어 개발은 백로그.
+- 길이 정책: 3초 미만 등록 불가 / 5~15초 권장 / 30초 이상 경고로 정정.
+- 자동 받아쓰기 모델: 상태 안내만 있고 받기/삭제 버튼은 없음으로 정정(백로그).
+
+### 미검증(실기 필요)
+- Windows RTX 2070 SUPER에서의 실제 GPU E2E(`scripts\validate_runtime_gpu_windows.bat`,
+  `python -m pytest tests/test_gpu_real.py -m gpu`, 설치본 A~Z 흐름)는 미검증.
+  상태: **CODE READY / WINDOWS P13 VALIDATION REQUIRED**.
+
 ## 로그
 ### P00
 - 목표: 기술 스택 사실확인

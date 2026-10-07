@@ -52,11 +52,43 @@ def segment_with_flags(script: str, *, target: int = config.TARGET_SEGMENT_CHARS
                     buf = candidate
         if buf:
             chunks.append(buf)
-        # 문단 내 첫 chunk가 min_chars보다 짧으면 다음 문단과 합치지 않는다(문단 경계 존중).
+        # 너무 짧은 chunk를 같은 문단 내 이웃과 합친다(docs "너무 짧은 문장은
+        # 이웃 문장과 합친다" 계약, P13 §23). hard_max를 넘기지 않고,
+        # 문단 경계를 넘는 merge는 하지 않는다.
+        chunks = _merge_short_chunks(chunks, hard_max=hard_max, min_chars=min_chars)
         for c_idx, chunk in enumerate(chunks):
             segments.append(chunk)
             flags.append(p_idx > 0 and c_idx == 0)
     return segments, flags
+
+def _merge_short_chunks(chunks: list[str], *, hard_max: int,
+                        min_chars: int) -> list[str]:
+    """문단 내 인접 chunk를 앞쪽으로 합쳐 min_chars 이상으로 만든다.
+
+    - 문단 경계 merge는 하지 않는다(segment_with_flags에서 문단별로 호출).
+    - 합친 결과가 hard_max를 초과하면 merge하지 않는다.
+    - gap_flags semantics 유지: 문단 내부 merge는 gap(False) 구간끼리만
+      결합되므로 flags 재계산 결과는 동일한 문단 경계 패턴을 유지한다.
+    """
+    if min_chars <= 0 or not chunks:
+        return chunks
+    merged: list[str] = []
+    buf = ""
+    for chunk in chunks:
+        candidate = f"{buf} {chunk}" if buf else chunk
+        if buf and len(buf) < min_chars:
+            if len(candidate) <= hard_max:
+                buf = candidate
+                continue
+            merged.append(buf)
+            buf = chunk
+        else:
+            if buf:
+                merged.append(buf)
+            buf = chunk
+    if buf:
+        merged.append(buf)
+    return merged
 
 def segment_script(script: str, **kw) -> list[str]:
     return segment_with_flags(script, **kw)[0]

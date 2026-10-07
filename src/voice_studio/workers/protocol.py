@@ -30,6 +30,12 @@ def result_event(output_path: str, job_id: str = "", **extra: Any) -> dict[str, 
     return ev
 
 def emit(ev: dict[str, Any]) -> None:
-    """stdout JSONL 1줄 출력. line-buffer flush로 QProcess readyRead가 즉시 받도록 한다."""
-    sys.stdout.write(json.dumps(ev, ensure_ascii=False) + "\n")
+    """stdout JSONL 1줄 출력. line-buffer flush로 QProcess readyRead가 즉시 받도록 한다.
+
+    wire encoding 계약(P13): ensure_ascii=True로 ASCII-only JSONL을 유지한다.
+    Windows worker의 stdout text encoding이 locale/CP949로 열려도 바이트가
+    locale에 의존하지 않아, 메인 프로세스의 UTF-8 decode 계약이 깨지지 않는다.
+    한글은 JSON unicode escape으로 전송되고 json.loads가 원문으로 복원한다.
+    """
+    sys.stdout.write(json.dumps(ev, ensure_ascii=True) + "\n")
     sys.stdout.flush()

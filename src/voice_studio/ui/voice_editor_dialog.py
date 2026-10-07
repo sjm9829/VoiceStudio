@@ -7,6 +7,7 @@
 """
 
 from __future__ import annotations
+import datetime
 import json
 import logging
 import math
@@ -23,7 +24,7 @@ from ..core import config
 from ..core.errors import (VoiceStudioError, ProfileError, DuplicateNameError,
                            ConsentRequiredError, TranscriptRequiredError, FfmpegNotFoundError,
                            UnsupportedAudioError)
-from ..core.paths import preview_cache_dir
+from ..core.paths import logs_dir, preview_cache_dir
 from ..workers.job_schema import build_register_payload
 from ..workers.launcher import worker_command
 from ..workers.linebuffer import JsonlBuffer
@@ -154,6 +155,9 @@ class VoiceEditorDialog(QDialog):
         self._worker: QProcess | None = None
         self._buffer = JsonlBuffer()
         self._job_dir: Path | None = None
+        # P13 §7: worker stderr 로그 식별용 메타데이터.
+        self._worker_job_id = ""
+        self._worker_mode = "register"
         # P12.3 Final Hotfix: 자신이 실제로 acquire한 slot만 release하기 위한 ownership 상태.
         self._job_slot_acquired = False
         self._result_event: dict | None = None
@@ -446,6 +450,7 @@ class VoiceEditorDialog(QDialog):
             job_file = job_dir / "job.json"
             job_file.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
             self._job_dir = job_dir
+            self._worker_job_id = job["job_id"]
             self._buffer = JsonlBuffer()
             self._result_event = None
             self._error_message = None
@@ -470,24 +475,64 @@ class VoiceEditorDialog(QDialog):
         for ev in self._buffer.feed(bytes(self._worker.readAllStandardOutput())):
             kind = ev.get("kind")
             if kind == "error":
+                # P13 §8: UI에는 message/user_message만 노출한다. 기술 detail
+                # (예: TypeError traceback)는 로그에만 남긴다.
                 self._error_message = ev.get("message", "오류가 발생했습니다.")
                 detail = ev.get("detail") or ""
                 if detail:
-                    self._error_message = f"{self._error_message}\n{detail}"
+                    logging.getLogger(__name__).warning(
+                        "worker error detail: job=%s mode=%s detail=%s",
+                        ev.get("job_id", self._worker_job_id), ev.get("mode", "?"), detail)
             elif kind == "result":
                 self._result_event = ev
 
     def _on_worker_stderr(self):
-        # stderr는 진단용. UI에는 보이지 않게 유지한다.
-        pass
+        """worker stderr를 진단 로그 파일로 보존한다(P13 §7).
+
+        UI에는 표시하지 않고, %LOCALAPPDATA%\VoiceStudio\logs\worker-stderr.log에
+        job_id/mode/timestamp와 함께 append한다. stdout JSONL protocol과 섞지 않는다.
+        """
+        if self._worker is None:
+            return
+        text = bytes(self._worker.readAllStandardError()).decode("utf-8", "replace")
+        if not text:
+            return
+        self._append_worker_stderr_log(text)
+
+    def _append_worker_stderr_log(self, text: str) -> None:
+        logging.getLogger(__name__).warning("worker stderr: %s", text)
+        try:
+            logs_dir().mkdir(parents=True, exist_ok=True)
+            stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with (logs_dir() / "worker-stderr.log").open("a", encoding="utf-8") as fp:
+                fp.write(f"\n---- {stamp} job={self._worker_job_id} mode={self._worker_mode} ----\n")
+                fp.write(text)
+                if not text.endswith("\n"):
+                    fp.write("\n")
+        except OSError:
+            logging.getLogger(__name__).warning("worker-stderr.log 기록 실패", exc_info=True)
 
     def closeEvent(self, event):
-        """P12.3 Final Hotfix: 무조건 release하지 않는다.
+        """QThread lifecycle(P13 §15) + P12.3 Final Hotfix slot 계약.
 
-        등록 worker 실행 중이 아니면 coordinator를 건드리지 않고, 실행 중이면
-        worker 종료를 요청한다. slot 반납은 _on_register_finished에서 수행하므로
-        다른 화면이 점유한 narrate slot을 여기서 풀 수 없다.
+        파형 분석/받아쓰기/미리듣기 스레드가 실행 중이면 close를 차단한다.
+        running 중인 QThread가 dialog보다 먼저 파괴되면
+        "QThread: Destroyed while thread is still running" crash가 나므로,
+        가장 단순하고 안전한 정책인 close 차단을 사용한다.
+        등록 worker(QProcess) 실행 중에는 기존대로 terminate 요청 후 진행한다.
         """
+        for name in ("_loader", "_transcribe_thread", "_preview_thread"):
+            thread = getattr(self, name, None)
+            if thread is not None and thread.isRunning():
+                QMessageBox.information(
+                    self, "보이스 스튜디오",
+                    "오디오 작업이 진행 중입니다. 완료 후 창을 닫아 주세요.")
+                event.ignore()
+                return
+        # P12.3 Final Hotfix: 무조건 release하지 않는다.
+        # 등록 worker 실행 중이 아니면 coordinator를 건드리지 않고, 실행 중이면
+        # worker 종료를 요청한다. slot 반납은 _on_register_finished에서 수행하므로
+        # 다른 화면이 점유한 narrate slot을 여기서 풀 수 없다.
         if self._worker is not None:
             terminate = getattr(self._worker, "terminate", None)
             if callable(terminate):
@@ -511,6 +556,8 @@ class VoiceEditorDialog(QDialog):
             self.progress.setVisible(False)
             self.save_btn.setEnabled(True)
             self._cleanup_job()
+            if hasattr(self._worker, "deleteLater"):
+                self._worker.deleteLater()  # P13 §22: QProcess 객체 정리
             self._worker = None
             if code == 0 and self._result_event is not None:
                 self.status_label.setText("")

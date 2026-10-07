@@ -95,14 +95,26 @@ class RealFfmpegAdapter:
         return (r.stdout.splitlines() or [""])[0]
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess:
-        return subprocess.run(args, capture_output=True, text=True, timeout=300)
+        """텍스트(stdout/stderr JSON 등)용 subprocess. Windows locale 의존 제거(P13).
+
+        ffprobe JSON/ffmpeg -version의 한글 filename·metadata가 CP949 등
+        locale codepage로 깨지지 않도록 UTF-8로 고정한다. errors="replace"로
+        드물게 비정상 바이트가 나와도 exception 대신 안전히 대체한다.
+        raw PCM(f32le stdout/stdin) 경로는 text=True를 쓰지 않는다.
+        """
+        return subprocess.run(args, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=300)
 
     def probe(self, path: str) -> dict:
         if not path.lower().endswith(SUPPORTED_SUFFIXES):
             _log.warning("probe 실패: 미지원 확장자 path=%r", path)
             raise UnsupportedAudioError(f"unsupported suffix: {path}")
+        # 필요한 field만 요청(P13): filename/creation_time 같은 임의 Unicode
+        # metadata가 stdout에 들어와 encoding 경계를 흔들지 않게 한다.
         r = self._run([self.ffprobe, "-v", "error", "-print_format", "json",
-                       "-show_format", "-show_streams", path])
+                       "-show_entries",
+                       "format=duration,format_name:stream=codec_type,duration,"
+                       "sample_rate,channels,codec_name", path])
         if r.returncode != 0:
             stderr = (r.stderr or "").strip()[:300]
             _log.warning("probe 실패: path=%r returncode=%s stderr=%s", path, r.returncode, stderr)
@@ -111,7 +123,7 @@ class RealFfmpegAdapter:
             data = json.loads(r.stdout)
         except ValueError as exc:
             _log.warning("probe 실패: path=%r ffprobe 출력 파싱 실패: %s", path, exc)
-            raise UnsupportedAudioError("ffprobe 출력을 해석할 수 없습니다.") from exc
+            raise UnsupportedAudioError("ffprobe 출력을 해석할 수 없습니다.") from excxc
         fmt = data.get("format", {})
         audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
         if audio is None:

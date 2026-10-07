@@ -22,8 +22,14 @@ import numpy as np
 
 MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 
-def _to_numpy(value: Any) -> np.ndarray | None:
-    """torch.Tensor/ndarray/list를 numpy로 변환한다. torch.Tensor는 detach().cpu() 후 변환."""
+def tensor_to_numpy(value: Any) -> np.ndarray | None:
+    """torch.Tensor/ndarray/list를 numpy로 변환한다(P13 dtype 경계).
+
+    - GPU tensor: detach() → cpu().
+    - bfloat16: Tensor.numpy()가 미지원(TypeError: Got unsupported ScalarType
+      BFloat16)이므로 저장 가능한 float32로 normalize한다(임베딩 경계용).
+    - 정수 dtype(int/long ref_code)은 원래 dtype을 보존한다(float 변환 금지).
+    """
     if value is None:
         return None
     if isinstance(value, np.ndarray):
@@ -33,8 +39,14 @@ def _to_numpy(value: Any) -> np.ndarray | None:
     except ImportError:
         torch = None  # type: ignore[assignment]
     if torch is not None and isinstance(value, torch.Tensor):
-        value = value.detach().cpu().numpy()
+        t = value.detach().cpu()
+        if t.dtype == torch.bfloat16:
+            t = t.float()
+        return t.numpy()
     return np.asarray(value)
+
+# 하위 호환 별칭
+_to_numpy = tensor_to_numpy
 
 def _from_numpy(value: np.ndarray | None) -> Any:
     """저장된 numpy 배열을 공식 API가 기대하는 torch.Tensor로 되돌린다."""
@@ -78,12 +90,31 @@ class QwenAdapter(Protocol):
     def generate(self, prompt: VoiceClonePromptSpec, text: str, sample_rate: int) -> np.ndarray: ...
 
 def default_device() -> str:
-    """CUDA가 가능하면 cuda:0, 아니면 cpu. worker에서만 호출한다."""
+    """CUDA가 가능하면 cuda:0, 아니면 cpu. dev tooling/테스트용."""
     try:
         import torch
     except ImportError:
         return "cpu"
     return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
+def production_device() -> str:
+    """production worker용 device 결정. CUDA가 없으면 CPU fallback 대신 실패(P13).
+
+    제품 정책: NVIDIA CUDA GPU required, CPU TTS fallback 없음.
+    production register/narrate worker는 이 함수를 사용하고, CUDA가 없으면
+    대형 Qwen 모델을 CPU에 올리지 않고 GpuUnavailableError로 실패한다.
+    FakeQwenAdapter/명시적 dev tooling은 이 강제를 받지 않는다.
+    """
+    try:
+        import torch
+    except ImportError:
+        from ..core.errors import GpuUnavailableError
+        raise GpuUnavailableError("torch가 설치되어 있지 않습니다.") from None
+    if not torch.cuda.is_available():
+        from ..core.errors import GpuUnavailableError
+        raise GpuUnavailableError("CUDA가 사용 가능한 GPU를 찾지 못했습니다.")
+    return "cuda:0"
 
 
 def _looks_like_attention_failure(exc: Exception) -> bool:
