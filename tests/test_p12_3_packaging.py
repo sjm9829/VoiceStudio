@@ -70,11 +70,10 @@ def test_spec_repo_root_paths():
 
 
 def test_build_requires_ffmpeg_binaries():
-    """P12.3-03: binary가 없으면 빌드가 중단된다(BUILD_OK 전 prerequisite 검사)."""
+    """P13: 빌드 전 prepare_ffmpeg.py로 pair를 구성하고 check_ffmpeg.py로 검증한다."""
     bat = (ROOT / "scripts" / "build_windows.bat").read_text(encoding="utf-8")
-    assert "if not exist third_party\\bin\\ffmpeg.exe" in bat
-    assert "if not exist third_party\\bin\\ffprobe.exe" in bat
-    assert bat.index("ffmpeg.exe missing") < bat.index("python -m venv")
+    assert "prepare_ffmpeg.py" in bat and "check_ffmpeg.py" in bat
+    assert bat.index("prepare_ffmpeg.py") < bat.index("python -m venv")
 
 
 def test_check_ffmpeg_script_contract():

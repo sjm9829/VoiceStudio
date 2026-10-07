@@ -8,19 +8,10 @@ REM CUDA_TAG can be overridden at build time; default is the current recommended
 REM cu126 (torch CUDA wheel supports RTX 2070 SUPER / CC 7.5).
 if "%CUDA_TAG%"=="" set CUDA_TAG=cu126
 
-REM FFmpeg build prerequisite (P12.3-03): binaries are not committed to the
-REM repository. Prepare them in third_party\bin before building; abort otherwise.
-if not exist third_party\bin\ffmpeg.exe (
-    echo [FAIL] third_party\bin\ffmpeg.exe missing
-    echo        Prepare the LGPL ffmpeg.exe build prerequisite in third_party\bin first.
-    goto :err
-)
-if not exist third_party\bin\ffprobe.exe (
-    echo [FAIL] third_party\bin\ffprobe.exe missing
-    goto :err
-)
-REM Verify the license/buildconf of the supplied binaries (P12.3-04). Review again
-REM before distribution if a GPL configuration is detected.
+REM FFmpeg build prerequisite (P13): binaries are not committed to the repository.
+REM Prepare them automatically from a fixed LGPL release (no manual download and
+REM no system PATH dependency), then verify license/buildconf (P12.3-04).
+python scripts\prepare_ffmpeg.py || goto :err
 python scripts\check_ffmpeg.py || goto :err
 
 python -m venv .venv || goto :err

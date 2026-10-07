@@ -31,14 +31,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-STEP = 0
-TOTAL = 15
-
-
 def step(msg: str) -> None:
-    global STEP
-    STEP += 1
-    print(f"[{STEP}/{TOTAL}] {msg}", flush=True)
+    """고정 total 없이 단계 이름만 출력한다(P13 §17 option B)."""
+    print(f"[P13] {msg}", flush=True)
 
 
 def fail(msg: str) -> "NoReturn":
@@ -89,13 +84,17 @@ def main() -> int:
     if not src_audio.is_file():
         fail(f"audio not found: {src_audio}")
 
-    from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location(
+        "runtime_validation_helpers", ROOT / "scripts" / "runtime_validation_helpers.py")
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    audio = _mod.make_validation_adapter()  # third_party/bin 고정(PATH 비의존)
     from voice_studio.infra.profile_repository import ProfileRepository
     from voice_studio.services.audio_service import AudioService
     from voice_studio.services.model_manager import ModelManager
     from voice_studio.services.profile_service import ProfileService
 
-    audio = RealFfmpegAdapter()
     model_dir = args.model_dir or _resolve_model_dir()
     if not model_dir:
         fail("모델 스냅샷을 찾지 못했습니다. 앱에서 모델을 받았는지 확인하거나 --model-dir을 지정하세요.")
@@ -155,7 +154,9 @@ def main() -> int:
         kinds = [e.get("kind") for e in events]
         print(f"      exit={r.returncode} events={kinds}")
         if r.returncode != 0:
-            fail(f"register worker failed: {r.stderr[-500:]}")
+            last_events = events[-3:] if events else []
+            fail(f"register worker failed: {r.stderr[-500:]} | last events: {last_events} | "
+                 f"diagnostics: {_logs_dir() / 'worker-stderr.log'}")
 
         # 8 result 이벤트 확인
         step("verify register result event")
@@ -173,11 +174,36 @@ def main() -> int:
             fail("persisted profile missing ref_code/ref_spk_embedding")
         step(f"profile persisted: {profile_uuid}")
 
-        # 10 자동 받아쓰기(faster-whisper small/int8, CPU). 기본 실행, --skip-stt로 생략.
+        # 9b 프로필 artifact 존재/무결성(P13 §19)
+        step("verify profile artifacts on disk")
+        pdir = Path(profiles_root) / profile_uuid
+        metadata = json.loads((pdir / "metadata.json").read_text(encoding="utf-8"))
+        for key in ("schema_version", "uuid", "name", "ref_text", "reference_duration_ms",
+                    "model_id", "x_vector_only_mode", "icl_mode", "ref_code_kind"):
+            if key not in metadata:
+                fail(f"metadata missing key: {key}")
+        prompt_path = pdir / "prompt.safetensors"
+        ref_flac = pdir / "reference.flac"
+        if not prompt_path.is_file() or prompt_path.stat().st_size == 0:
+            fail("prompt.safetensors missing/empty")
+        if not ref_flac.is_file() or ref_flac.stat().st_size == 0:
+            fail("reference.flac missing/empty")
+        audio.probe(str(ref_flac))  # decode 가능해야 한다
+        step("profile artifacts OK")
+
+        # 10 자동 받아쓰기. source면 source transcriber, frozen이면 exe --stt-smoke.
         if args.skip_stt:
             step("STT skipped (--skip-stt)")
+        elif args.app_exe:
+            step("STT smoke via frozen app (VoiceStudio.exe --stt-smoke)")
+            r_stt = subprocess.run(_stt_smoke_cmd(args.app_exe, str(src_audio), start_s, end_s),
+                                   capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", timeout=1200)
+            print(f"      exit={r_stt.returncode}")
+            if r_stt.returncode != 0:
+                fail(f"frozen STT smoke failed: {(r_stt.stderr or '')[-500:]}")
         else:
-            step("STT transcribe (faster-whisper small/int8)")
+            step("STT transcribe (source faster-whisper small/int8)")
             try:
                 from voice_studio.services.transcription_service import FasterWhisperTranscriber
                 text = FasterWhisperTranscriber().transcribe(pcm, 24000)
@@ -207,7 +233,9 @@ def main() -> int:
         kinds2 = [e.get("kind") for e in events2]
         print(f"      exit={r2.returncode} events={kinds2}")
         if r2.returncode != 0:
-            fail(f"narrate worker failed: {r2.stderr[-500:]}")
+            last_events = events2[-3:] if events2 else []
+            fail(f"narrate worker failed: {r2.stderr[-500:]} | last events: {last_events} | "
+                 f"diagnostics: {_logs_dir() / 'worker-stderr.log'}")
         step("progress events observed" if any(k == "progress" for k in kinds2) else "(progress 없이 완료)")
 
         # 13 MP3 결과 확인(protocol.result_event 계약: output_path)
@@ -235,6 +263,17 @@ def main() -> int:
         # temp 격리 데이터/작업물 정리(실제 사용자 프로필에는 영향 없음)
         shutil.rmtree(tmp_data, ignore_errors=True)
         shutil.rmtree(tmp_work, ignore_errors=True)
+
+
+def _stt_smoke_cmd(app_exe: str, audio_path: str, start_s: float, end_s: float) -> list[str]:
+    """frozen STT smoke 명령(exe 내부의 bundled FFmpeg/faster-whisper 사용)."""
+    return [app_exe, "--stt-smoke", "--audio", audio_path,
+            "--start", f"{start_s:.3f}", "--end", f"{end_s:.3f}"]
+
+
+def _logs_dir() -> Path:
+    from voice_studio.core.paths import logs_dir
+    return logs_dir()
 
 
 def _profiles_dir() -> Path:

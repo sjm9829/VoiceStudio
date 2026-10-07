@@ -98,8 +98,8 @@ def test_validate_runtime_gpu_windows_bat_exists_ascii_only():
     assert "check_cuda.py" in text
     assert "tests\\test_gpu_real.py -m gpu" in text or "test_gpu_real.py -m gpu" in text
     assert "p13_runtime_e2e.py" in text
-    # 사용자 audio/ref-text는 인자로 전달(hardcode 금지)
-    assert "%*" in text
+    # 사용자 audio/ref-text는 인자로 전달(hardcode 금지). source/frozen 분리 args.
+    assert "%SOURCE_ARGS%" in text and "%FROZEN_ARGS%" in text
 
 
 def test_all_bat_scripts_ascii_only():

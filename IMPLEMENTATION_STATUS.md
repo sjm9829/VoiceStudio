@@ -510,3 +510,48 @@ NVIDIA GPU가 없는 Windows 빌드 PC에서도 패키징이 성공하도록 bui
 아직 미완료(실기 대기, P13 진행 중):
 
 - Windows 실기 재검증 전까지 preview/STT/registration 성공으로 표시하지 않음(기존 P13 미완료 항목 유지)
+
+### P13 Runtime Stabilization 후속 정정 — validation/runtime infrastructure(2026-10-06, 이번 커밋)
+
+Windows 실기 빌드/검증 준비 단계에서 확인된 validation 인프라 결함을 수정했다. application 본체의
+P13 stabilization 수정(BF16 tensor_to_numpy, worker ASCII JSONL, FFmpeg/ffprobe UTF-8 subprocess,
+CUDA 강제, worker stderr logging, UI detail 비노출, -ss+-t segment 계약)은 변경하지 않았다.
+
+- **신규 `scripts/prepare_ffmpeg.py`**: 고정 release artifact
+  (`ffmpeg-n8.1.3-14-g330caae0c1-win64-lgpl-8.1.zip`, tag `autobuild-2026-10-06-13-06`,
+  SHA-256 `0b61370a3ed65970dae2624784a22a7667365431953ec1784f57eed10a06efd3`)을 내려받아
+  third_party/bin에 배치한다. 정상 pair 존재 시 네트워크 미사용, SHA-256 mismatch 시 설치 금지,
+  temp dir 추출 + staging + os.replace(atomic), partial 오염 없음, 기존 정상 binary 보존.
+  실제 artifact 다운로드 + hash 검증 + 추출 흐름을 실측 확인했다.
+- **`scripts/build_windows.bat`**: "ffmpeg.exe 없으면 fail" 수동 prerequisite 블록 제거 →
+  `python scripts\prepare_ffmpeg.py` → `python scripts\check_ffmpeg.py` 순서로 교체(ASCII-only 유지).
+- **신규 `scripts/runtime_validation_helpers.py`**: source validation이 PATH의 임의 ffmpeg가 아니라
+  repository `third_party/bin/ffmpeg.exe`/`ffprobe.exe`를 명시적으로 쓰게 하는 helper.
+  `tests/test_gpu_real.py`와 `scripts/p13_runtime_e2e.py`가 이 helper를 사용(PATH 비의존).
+- **`src/voice_studio/main.py`**: frozen/source 공용 내부 검증 CLI
+  `VoiceStudio.exe --stt-smoke --audio "<path>" --start 0 --end 6` 추가. bundled FFmpeg decode →
+  bundled faster-whisper transcribe, 성공 exit 0 + `STT_SMOKE_OK`, 실패 non-zero,
+  상세는 logs/stt-smoke.log에 기록, profile 생성 없음. production UI/worker 경로 변경 없음.
+- **`scripts/p13_runtime_e2e.py`**: frozen mode STT는 source transcriber 대신 exe `--stt-smoke` 실행;
+  source/frozen worker 분리 유지; step counter 고정 total 제거(`[P13] <단계>` 형식);
+  register 후 metadata.json 키/prompt.safetensors/reference.flac(ffprobe decode) 검증 추가;
+  worker 실패 시 마지막 events + worker-stderr.log 위치 안내; `output_path` 계약,
+  ModelManager().model_path() 우선 + LOCALAPPDATA 격리보다 모델 resolve 먼저 유지.
+- **`scripts/validate_runtime_gpu_windows.bat`**: 게이트 순서 강화 — 조합 기록 → prepare_ffmpeg →
+  check_ffmpeg → check_cuda → `pytest tests\test_gpu_real.py -m gpu` → SOURCE E2E(`SOURCE_E2E_OK`) →
+  frozen exe 존재 확인 → frozen strict smoke(`--smoke-test --require-gpu`) → FROZEN E2E
+  (`SOURCE_ARGS`/`FROZEN_ARGS` 분리로 --app-exe 중복 방지, `FROZEN_E2E_OK`) → `GPU_VALIDATION_OK`.
+- **신규 regression**: `tests/test_p13_ffmpeg_prepare.py`(prepare_ffmpeg 시나리오 A~K,
+  downloader/extractor/verifier 주입, 실인터넷 미사용), `tests/test_p13_stt_smoke.py`
+  (STT smoke dispatch/exit code/log marker/profile 부작용 없음 + E2E 구조 회귀),
+  기존 packaging/validation 계약 테스트를 새 흐름에 맞게 정정.
+
+### 테스트(이번 정정)
+- `uv run pytest`(offscreen Qt + 로컬 libGL, ffmpeg PATH 미포함): **299 passed / 14 skipped / 0 failed**.
+- prepare_ffmpeg 실측: 실제 artifact 다운로드 + 고정 SHA-256 검증 통과 후 ffmpeg.exe/ffprobe.exe 배치,
+  두 번째 실행은 네트워크 0회로 skip.
+
+### 상태
+- **CODE READY / WINDOWS SOURCE E2E REQUIRED / WINDOWS FROZEN E2E REQUIRED / WINDOWS FROZEN STT REQUIRED**.
+- 이 개발 환경에 GPU가 없어 `pytest -m gpu`, source E2E, frozen smoke, frozen E2E, frozen STT smoke은
+  **NOT RUN**이며 Windows 실기에서 validate_runtime_gpu_windows.bat로 수행해야 한다.

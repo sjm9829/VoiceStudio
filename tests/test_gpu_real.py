@@ -54,6 +54,17 @@ def _adapter():
     return RealQwenAdapter(model_path=_model_path(), device=production_device())
 
 
+def _validation_ffmpeg_adapter():
+    """third_party/bin binary를 명시적으로 쓰는 adapter(PATH 비의존, P13 §7)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "runtime_validation_helpers",
+        Path(__file__).resolve().parents[1] / "scripts" / "runtime_validation_helpers.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.make_validation_adapter()
+
+
 def _assert_sane_pcm(pcm):
     assert isinstance(pcm, np.ndarray), type(pcm)
     assert pcm.ndim == 1
@@ -97,12 +108,11 @@ def test_c_profile_roundtrip_in_new_model_instance(tmp_path):
     from voice_studio.infra.profile_repository import ProfileRepository
     from voice_studio.services.profile_service import ProfileService
     from voice_studio.services.audio_service import AudioService
-    from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter
     profiles_root = tmp_path / "profiles"
     adapter = _adapter()
     spec = adapter.create_prompt(_reference_pcm(), 24000, REF_TEXT)
     repo = ProfileRepository(profiles_root)
-    service = ProfileService(repo, AudioService(RealFfmpegAdapter()), qwen=adapter)
+    service = ProfileService(repo, AudioService(_validation_ffmpeg_adapter()), qwen=adapter)
     pcm = _reference_pcm()
     wav_path = tmp_path / "ref.wav"
     import wave
@@ -123,7 +133,7 @@ def test_c_profile_roundtrip_in_new_model_instance(tmp_path):
 
     # 새 모델 인스턴스 + 저장된 프로필 재로드 → 생성
     adapter2 = _adapter()
-    service2 = ProfileService(repo, AudioService(RealFfmpegAdapter()), qwen=adapter2)
+    service2 = ProfileService(repo, AudioService(_validation_ffmpeg_adapter()), qwen=adapter2)
     spec2 = service2.load_prompt_spec(uuid)
     assert spec2.ref_code is not None and spec2.ref_spk_embedding is not None
     pcm2 = adapter2.generate(spec2, GEN_TEXT, 24000)
@@ -138,7 +148,6 @@ def test_d_profile_roundtrip_in_new_process(tmp_path):
     from voice_studio.infra.profile_repository import ProfileRepository
     from voice_studio.services.profile_service import ProfileService
     from voice_studio.services.audio_service import AudioService
-    from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter
     from voice_studio.infra.qwen_adapter import RealQwenAdapter, production_device
     profiles_root = tmp_path / "profiles"
     pcm = _reference_pcm()
@@ -148,7 +157,7 @@ def test_d_profile_roundtrip_in_new_process(tmp_path):
         wf.writeframes((pcm * 32767).astype(np.int16).tobytes())
     adapter = RealQwenAdapter(model_path=_model_path(), device=production_device())
     spec = adapter.create_prompt(pcm, 24000, REF_TEXT)
-    service = ProfileService(ProfileRepository(profiles_root), AudioService(RealFfmpegAdapter()), qwen=adapter)
+    service = ProfileService(ProfileRepository(profiles_root), AudioService(_validation_ffmpeg_adapter()), qwen=adapter)
     profile = service.register(
         name="GPU proc", source_path=str(wav_path), start_s=0.0, end_s=6.0,
         ref_text=REF_TEXT, consent=True, prompt=spec, waveform=pcm, sample_rate=24000)
@@ -162,13 +171,15 @@ def test_d_profile_roundtrip_in_new_process(tmp_path):
     code = (
         "import sys; sys.path.insert(0, r'{src}');\n"
         "import numpy as np;\n"
-        "from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter;\n"
+        
+        "import importlib.util as ilu;\n"
+        "vs = ilu.spec_from_file_location('rvh', r'{rvh}'); m = ilu.module_from_spec(vs); vs.loader.exec_module(m);\n"
         "from voice_studio.infra.profile_repository import ProfileRepository;\n"
         "from voice_studio.infra.qwen_adapter import RealQwenAdapter, production_device;\n"
         "from voice_studio.services.audio_service import AudioService;\n"
         "from voice_studio.services.profile_service import ProfileService;\n"
         "repo = ProfileRepository(r'{root}');\n"
-        "service = ProfileService(repo, AudioService(RealFfmpegAdapter()));\n"
+        "service = ProfileService(repo, AudioService(_validation_ffmpeg_adapter()));\n"
         "spec = service.load_prompt_spec('{uuid}');\n"
         "assert spec.ref_code is not None and spec.ref_spk_embedding is not None;\n"
         "assert spec.ref_text;\n"
@@ -178,8 +189,8 @@ def test_d_profile_roundtrip_in_new_process(tmp_path):
         "assert pcm.size > 0 and np.isfinite(pcm).all();\n"
         "assert float(np.abs(pcm).max()) > 1e-4;\n"
         "print('GPU_ROUNDTRIP_OK')\n"
-    ).format(src=str(root / "src"), root=str(profiles_root), uuid=uuid,
-             model=_model_path(), gen=GEN_TEXT)
+    ).format(src=str(root / "src"), rvh=str(root / "scripts" / "runtime_validation_helpers.py"),
+             root=str(profiles_root), uuid=uuid, model=_model_path(), gen=GEN_TEXT)
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=900)
     assert "GPU_ROUNDTRIP_OK" in r.stdout, r.stderr
 
