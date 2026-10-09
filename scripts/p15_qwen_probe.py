@@ -29,7 +29,7 @@ GPU 실험(각 생성 직후 diagnostics/p15_qwen_probe/<label>/01_qwen_raw_24k.
   python scripts/p15_qwen_probe.py --gpu <uuid> --runs 3
 """
 from __future__ import annotations
-import argparse, hashlib, json, sys
+import argparse, hashlib, json, sys, time
 from pathlib import Path
 
 import numpy as np
@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from voice_studio.core import config
-from voice_studio.core.errors import ProfileError
+from voice_studio.core.errors import ProfileError, UnsupportedAudioError
 from voice_studio.infra.profile_repository import ProfileRepository
 from voice_studio.infra.qwen_adapter import production_device
 from voice_studio.services.model_manager import ModelManager
@@ -70,6 +70,12 @@ def save_raw(label: str, pcm: np.ndarray, sample_rate: int, out_dir: Path = DEFA
     d = out_dir / label
     d.mkdir(parents=True, exist_ok=True)
     path = d / "01_qwen_raw_24k.wav"
+    if path.exists():
+        # 이전 진단 WAV를 조용히 덮어쓰지 않는다: 같은 라벨 재실행 시 번호를 붙여 보존한다.
+        n = 2
+        while (d / f"01_qwen_raw_24k_{n}.wav").exists():
+            n += 1
+        path = d / f"01_qwen_raw_24k_{n}.wav"
     _write_wav_f32(path, pcm, sample_rate)
     back, sr = read_wav_f32(path)
     if sr != int(sample_rate) or back.size != np.asarray(pcm).size:
@@ -128,6 +134,35 @@ def _probe_ffmpeg_adapter():
                              ffprobe=str(repo_bin / "ffprobe.exe"))
 
 
+def load_reference_via_probe(repo: ProfileRepository, uuid: str) -> tuple[np.ndarray, dict]:
+    """참조 음성 로딩을 --inspect/--stt/--gpu 공용 경로로 통일한다.
+
+    repo third_party/bin FFmpeg만 사용하고, ffprobe로 실측 duration을 구한 뒤
+    그 구간을 REFERENCE_SAMPLE_RATE float32로 디코딩한다. 실측 길이와 디코딩
+    샘플 수가 맞지 않으면 즉시 오류로 실패시켜 부정확한 참조 PCM이 실험에
+    유입되지 않게 한다.
+    """
+    flac = repo.path_for(uuid) / "reference.flac"
+    if not flac.is_file():
+        raise ProfileError(f"참조 음성 파일이 없습니다: {flac}")
+    adapter = _probe_ffmpeg_adapter()
+    info = adapter.probe(str(flac))
+    duration = float(info["duration"])
+    if duration <= 0:
+        raise UnsupportedAudioError(f"ffprobe duration이 비정상입니다: {duration}")
+    pcm = adapter.decode_segment(str(flac), 0.0, duration,
+                                 config.REFERENCE_SAMPLE_RATE).astype(np.float32)
+    expected = int(round(duration * config.REFERENCE_SAMPLE_RATE))
+    tol = int(round(config.REFERENCE_SAMPLE_RATE * 0.05))
+    if abs(int(pcm.size) - expected) > tol:
+        raise UnsupportedAudioError(
+            f"디코딩 길이 불일치: ffprobe {duration:.3f}s(기대 {expected} samples) vs 실제 {pcm.size} samples")
+    meta = {"duration_s": round(duration, 3), "probe_sample_rate": int(info["sample_rate"]),
+            "probe_codec": info.get("codec", ""), "decoded_samples": int(pcm.size),
+            "decoded_sample_rate": int(config.REFERENCE_SAMPLE_RATE)}
+    return pcm, meta
+
+
 def cmd_list(repo: ProfileRepository) -> int:
     profiles = repo.list_profiles()
     if not profiles:
@@ -154,19 +189,14 @@ def cmd_inspect(repo: ProfileRepository, uuid: str, out_dir: Path) -> int:
         "reference_duration_ms": profile.reference_duration_ms,
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    flac = repo.path_for(uuid) / "reference.flac"
-    if flac.is_file():
-        try:
-            from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter
-            adapter = _probe_ffmpeg_adapter()
-            pcm = adapter.decode_segment(str(flac), 0.0, 1e9, config.REFERENCE_SAMPLE_RATE).astype(np.float32)
-            path = save_raw("reference_from_profile", pcm, config.REFERENCE_SAMPLE_RATE, out_dir)
-            print(f"reference.wav 저장: {path}")
-            print("reference silence:", json.dumps(silence_report(pcm, config.REFERENCE_SAMPLE_RATE)))
-        except Exception as exc:
-            print(f"참조 FLAC 디코딩 실패(ffmpeg 필요): {type(exc).__name__}: {exc} [NOT RUN]")
-    else:
-        print("reference.flac 없음 [NOT RUN]")
+    try:
+        pcm, ref_meta = load_reference_via_probe(repo, uuid)
+        print("reference probe:", json.dumps(ref_meta, ensure_ascii=False))
+        path = save_raw("reference_from_profile", pcm, config.REFERENCE_SAMPLE_RATE, out_dir)
+        print(f"reference.wav 저장: {path}")
+        print("reference silence:", json.dumps(silence_report(pcm, config.REFERENCE_SAMPLE_RATE)))
+    except Exception as exc:
+        print(f"참조 음성 검증·디코딩 실패(ffmpeg/파일 필요): {type(exc).__name__}: {exc} [NOT RUN]")
     return 0
 
 
@@ -174,10 +204,7 @@ def cmd_stt(repo: ProfileRepository, uuid: str) -> int:
     """등록 참조 음성을 받아써 ref_text와 일치하는지 검증(옵트인, CPU faster-whisper)."""
     profile, _, _ = load_spec(repo, uuid)
     try:
-        from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter
-        adapter = _probe_ffmpeg_adapter()
-        pcm = adapter.decode_segment(str(repo.path_for(uuid) / "reference.flac"), 0.0, 1e9,
-                                     config.REFERENCE_SAMPLE_RATE).astype(np.float32)
+        pcm, ref_meta = load_reference_via_probe(repo, uuid)
     except Exception as exc:
         print(f"참조 음성 디코딩 실패: {type(exc).__name__}: {exc} [NOT RUN]")
         return 3
@@ -219,82 +246,169 @@ def _gen_and_save(adapter: RealQwenAdapter, label: str, spec: VoiceClonePromptSp
         x_vector_only_mode=spec.x_vector_only_mode, icl_mode=spec.icl_mode,
         ref_text=spec.ref_text or None)
     kwargs = dict(extra or {})
+    t0 = time.monotonic()
     wavs, out_sr = adapter._model.generate_voice_clone(
         text, language=language, voice_clone_prompt=[item], **kwargs)
+    elapsed = round(time.monotonic() - t0, 3)
     wav = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
     path = save_raw(label, wav, int(out_sr), out_dir)
     rep = {"label": label, "language": language, "extra": kwargs, "sample_rate": int(out_sr),
-           "wav": str(path), "silence": silence_report(wav, int(out_sr))}
+           "wav": str(path), "generation_s": elapsed, "silence": silence_report(wav, int(out_sr))}
     print(json.dumps(rep, ensure_ascii=False))
     return rep
 
 
+def _mark(results: dict, step: str, status: str, **extra) -> None:
+    """실험별 상태 기록. 동일 스텝 재기록 시 목록으로 병합한다(반복 실험 대응)."""
+    entry = {"status": status, **extra}
+    if step in results:
+        prev = results[step]
+        if isinstance(prev, list):
+            prev.append(entry)
+        else:
+            results[step] = [prev, entry]
+        return
+    results[step] = entry
+
+
+def supported_params_probe(model) -> dict:
+    """공식 generate_voice_clone 지원 파라미터 확인.
+
+    **kwargs만으로 전달되는 샘플링 파라미터는 시그니처에 이름이 없어도 공식 API가
+    받을 수 있으므로 SKIP 판정 근거로 쓰지 않는다(실행 TypeError만 SKIP 근거).
+    inspect.signature 예외 시에도 accepts_kwargs를 항상 False로 초기화해
+    미정의 변수 오류를 내지 않는다.
+    """
+    import inspect
+    try:
+        sig = inspect.signature(model.generate_voice_clone)
+        supported = [p.name for p in sig.parameters.values()
+                     if p.name not in ("self", "text", "language", "voice_clone_prompt")]
+        accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD
+                             for p in sig.parameters.values())
+        return {"supported": supported, "accepts_kwargs": accepts_kwargs, "error": None}
+    except (TypeError, ValueError) as exc:
+        return {"supported": [], "accepts_kwargs": False, "error": str(exc)}
+
+
+def _gpu_adapter(model_path: str | None) -> RealQwenAdapter:
+    """GPU 프로브 전용 어댑터. production 정책을 그대로 따른다.
+
+    - device는 production_device()(CUDA 없으면 GpuUnavailableError, CPU fallback 없음).
+      dtype은 RealQwenAdapter 내부 preferred_dtype(FP16/BF16) 정책을 그대로 사용.
+    - model_path 미지정 시 HF repo로 자동 다운로드하지 않고, 앱이 이미 받아둔
+      ModelManager 로컬 스냅샷을 사용한다(없으면 ModelNotDownloadedError → NOT RUN).
+    """
+    if model_path is None:
+        model_path = ModelManager().model_path()
+    return RealQwenAdapter(model_path=model_path, device=production_device())
+
+
+REQUIRED_EXPERIMENTS = ("prompt_compare", "03_fresh_prompt_auto", "04_stored_auto",
+                        "04_stored_korean", "04_fresh_korean", "repeat_variability")
+
+
 def cmd_gpu(repo: ProfileRepository, uuid: str, out_dir: Path, model_path: str | None,
             runs: int) -> int:
+    results: dict = {}
     profile, tensors, stored_spec = load_spec(repo, uuid)
+
+    # FFmpeg·참조 음성 유효성을 GPU 모델 로드 전에 확인한다. 실패 시 NOT RUN과
+    # 구체적 원인을 출력하고 Qwen 모델을 불필요하게 적재하지 않는다.
     try:
+        ref_pcm, ref_meta = load_reference_via_probe(repo, uuid)
+    except Exception as exc:
+        print(f"참조 음성 검증 실패: {type(exc).__name__}: {exc} [NOT RUN]")
+        return 3
+    print("reference probe:", json.dumps(ref_meta, ensure_ascii=False))
+
+    try:
+        device = production_device()
+        resolved_model = str(model_path) if model_path else str(ModelManager().model_path())
         adapter = _gpu_adapter(model_path)
     except Exception as exc:
         print(f"모델 로드 실패: {type(exc).__name__}: {exc} [NOT RUN]")
         return 3
-
-    # (1) 동일 참조 음성으로 공식 API 프롬프트 새 생성
-    ref_pcm = repo.load_reference_pcm(uuid, config.REFERENCE_SAMPLE_RATE)
-    fresh = adapter.create_prompt(ref_pcm, config.REFERENCE_SAMPLE_RATE, profile.ref_text)
-
-    # (2) 저장 프롬프트 vs 신규 프롬프트 비교
-    fp_stored = fingerprint(tensors.get("ref_code"), tensors.get("ref_spk_embedding"))
-    fp_fresh = fingerprint(fresh.ref_code, fresh.ref_spk_embedding)
-    print(json.dumps({"step": "prompt_compare", "stored": fp_stored, "fresh": fp_fresh,
-                      "diff": tensor_diff(fp_stored, fp_fresh)}, ensure_ascii=False))
-
-    # (3) 신규 프롬프트 직접 추론 + (4) Auto vs Korean (저장 프롬프트 기준)
     try:
-        _gen_and_save(adapter, "03_fresh_prompt_auto", fresh, SCRIPT_TEXT, None, out_dir=out_dir)
-        _gen_and_save(adapter, "04_stored_auto", stored_spec, SCRIPT_TEXT, None, out_dir=out_dir)
-        _gen_and_save(adapter, "04_stored_korean", stored_spec, SCRIPT_TEXT, "Korean", out_dir=out_dir)
-        _gen_and_save(adapter, "04_fresh_korean", fresh, SCRIPT_TEXT, "Korean", out_dir=out_dir)
+        dtype = str(__import__("voice_studio.infra.qwen_adapter", fromlist=["preferred_dtype"]).preferred_dtype(device))
+    except Exception:
+        dtype = "n/a"
+
+    # (1) 동일 참조 음성으로 공식 API 프롬프트 새 생성 + (2) 저장 프롬프트와 비교
+    try:
+        fresh = adapter.create_prompt(ref_pcm, config.REFERENCE_SAMPLE_RATE, profile.ref_text)
+        fp_stored = fingerprint(tensors.get("ref_code"), tensors.get("ref_spk_embedding"))
+        fp_fresh = fingerprint(fresh.ref_code, fresh.ref_spk_embedding)
+        diff = tensor_diff(fp_stored, fp_fresh)
+        print(json.dumps({"step": "prompt_compare", "stored": fp_stored, "fresh": fp_fresh,
+                          "diff": diff}, ensure_ascii=False))
+        _mark(results, "prompt_compare", "FAIL" if diff else "OK", diff=diff)
     except Exception as exc:
-        print(f"생성 실패: {type(exc).__name__}: {exc} [NOT RUN 이후 단계]")
-        return 3
+        print(f"프롬프트 재생성·비교 실패: {type(exc).__name__}: {exc}")
+        _mark(results, "prompt_compare", "FAIL", error=f"{type(exc).__name__}: {exc}")
+
+    # (3) 신규 프롬프트 직접 추론 + (4) Auto vs Korean (각각 독립 상태 기록)
+    gen_plan = (("03_fresh_prompt_auto", fresh, None),
+                ("04_stored_auto", stored_spec, None),
+                ("04_stored_korean", stored_spec, "Korean"),
+                ("04_fresh_korean", fresh, "Korean"))
+    for label, spec, lang in gen_plan:
+        try:
+            rep = _gen_and_save(adapter, label, spec, SCRIPT_TEXT, lang, out_dir=out_dir)
+            _mark(results, label, "OK", wav=rep["wav"], generation_s=rep["generation_s"],
+                  params=rep["extra"], language=rep["language"])
+        except Exception as exc:
+            print(f"{label} 생성 실패: {type(exc).__name__}: {exc}")
+            _mark(results, label, "FAIL", error=f"{type(exc).__name__}: {exc}")
 
     # (5) 공식 API 지원 파라미터 확인
-    import inspect
-    try:
-        sig = inspect.signature(adapter._model.generate_voice_clone)
-        supported = [p.name for p in sig.parameters.values()
-                     if p.name not in ("self", "text", "language", "voice_clone_prompt")]
-        # **kwargs만으로 전달되는 샘플링 파라미터는 시그니처에 이름이 없어도
-        # 공식 API가 받을 수 있으므로 SKIP 판정 근거로 쓰지 않는다(실행 TypeError만 SKIP).
-        accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD
-                             for p in sig.parameters.values())
-        print(json.dumps({"step": "supported_params", "supported": supported,
-                          "accepts_kwargs": accepts_kwargs}, ensure_ascii=False))
-    except (TypeError, ValueError) as exc:
-        supported = []
-        print(f"signature 확인 실패: {exc} [NOT RUN]")
+    probe_res = supported_params_probe(adapter._model)
+    if probe_res["error"] is None:
+        print(json.dumps({"step": "supported_params",
+                          "supported": probe_res["supported"],
+                          "accepts_kwargs": probe_res["accepts_kwargs"]}, ensure_ascii=False))
+    else:
+        print(f"signature 확인 실패: {probe_res['error']} [NOT RUN]")
+    supported, accepts_kwargs = probe_res["supported"], probe_res["accepts_kwargs"]
 
-    # (6) temperature/top_k/top_p 하나씩 변경(지원하는 것만)
+    # (6) temperature/top_k/top_p 하나씩 변경(지원하는 것만, SKIP/FAIL 구분)
     for name, values in (("temperature", [0.7, 1.3]), ("top_k", [20, 50]), ("top_p", [0.8, 0.95])):
         if name not in supported and not accepts_kwargs:
+            _mark(results, f"06_{name}", "SKIP", reason="공식 시그니처에 없음(확장 없음)")
             print(f"{name}: 공식 시그니처에 없음(확장 없음) [SKIP]")
             continue
         for value in values:
+            key = f"06_{name}"
             try:
-                _gen_and_save(adapter, f"06_{name}_{str(value).replace('.', '_')}", stored_spec,
-                              SCRIPT_TEXT, None, {name: value}, out_dir)
+                rep = _gen_and_save(adapter, f"06_{name}_{str(value).replace('.', '_')}", stored_spec,
+                                    SCRIPT_TEXT, None, {name: value}, out_dir)
+                _mark(results, key, "OK", wav=rep["wav"], generation_s=rep["generation_s"],
+                      params={name: value})
             except TypeError as exc:
+                _mark(results, key, "SKIP", reason=f"미지원: {type(exc).__name__}: {exc}")
                 print(f"{name}={value} 미지원: {exc} [SKIP]")
+            except Exception as exc:
+                _mark(results, key, "FAIL", error=f"{type(exc).__name__}: {exc}")
+                print(f"{name}={value} 생성 실패: {type(exc).__name__}: {exc}")
 
     # (7) 동일 대본 반복 변동성
-    durations = []
+    durations, wavs = [], []
+    fail = None
     for i in range(max(1, runs)):
-        rep = _gen_and_save(adapter, f"07_repeat_{i + 1}", stored_spec, SCRIPT_TEXT, None, out_dir=out_dir)
-        durations.append(rep["silence"]["seconds"])
-    if len(set(durations)) > 1 or runs > 1:
+        try:
+            rep = _gen_and_save(adapter, f"07_repeat_{i + 1}", stored_spec, SCRIPT_TEXT, None, out_dir=out_dir)
+            durations.append(rep["silence"]["seconds"])
+            wavs.append(rep["wav"])
+        except Exception as exc:
+            fail = f"{type(exc).__name__}: {exc}"
+            break
+    if durations:
+        _mark(results, "repeat_variability", "OK", durations_s=durations, wavs=wavs)
         print(json.dumps({"step": "variability", "durations_s": durations}, ensure_ascii=False))
+    else:
+        _mark(results, "repeat_variability", "FAIL", error=fail or "no run")
 
-    # (8) x_vector_only_mode=True 신규 프롬프트 비교
+    # (8) x_vector_only_mode=True 신규 프롬프트 비교(참고 실험)
     try:
         xv_items = adapter._model.create_voice_clone_prompt(
             ref_audio=(ref_pcm, config.REFERENCE_SAMPLE_RATE), ref_text=profile.ref_text,
@@ -306,10 +420,20 @@ def cmd_gpu(repo: ProfileRepository, uuid: str, out_dir: Path, model_path: str |
             x_vector_only_mode=True, icl_mode=bool(item.icl_mode), ref_text=profile.ref_text)
         print(json.dumps({"step": "xvector_prompt", "fingerprint": fingerprint(xv_spec.ref_code, xv_spec.ref_spk_embedding)},
                          ensure_ascii=False))
-        _gen_and_save(adapter, "08_xvector_auto", xv_spec, SCRIPT_TEXT, None, out_dir=out_dir)
+        rep = _gen_and_save(adapter, "08_xvector_auto", xv_spec, SCRIPT_TEXT, None, out_dir=out_dir)
+        _mark(results, "08_xvector_auto", "OK", wav=rep["wav"], generation_s=rep["generation_s"])
     except Exception as exc:
-        print(f"x_vector_only 실험 실패: {type(exc).__name__}: {exc} [NOT RUN]")
-    return 0
+        print(f"x_vector_only 실험 실패: {type(exc).__name__}: {exc}")
+        _mark(results, "08_xvector_auto", "FAIL", error=f"{type(exc).__name__}: {exc}")
+
+    # 요약: 필수 실험 실패는 전체 성공으로 표시하지 않는다.
+    failed_required = [s for s in REQUIRED_EXPERIMENTS
+                       if (lambda e: e.get("status") == "FAIL" if isinstance(e, dict) else False)(results.get(s, {}))]
+    overall = "SUCCESS" if not failed_required else "FAILED"
+    print(json.dumps({"step": "summary", "overall": overall, "failed_required": failed_required,
+                      "experiments": results, "model_path": resolved_model,
+                      "device": str(device), "dtype": dtype}, ensure_ascii=False, indent=2))
+    return 4 if failed_required else 0
 
 
 def main(argv: list[str] | None = None) -> int:

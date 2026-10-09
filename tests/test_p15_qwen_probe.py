@@ -68,6 +68,21 @@ def test_save_raw_rejects_corrupt(tmp_path, monkeypatch):
         probe.save_raw("bad", pcm, 24000, tmp_path)
 
 
+def test_save_raw_does_not_silently_overwrite(tmp_path):
+    """같은 라벨 재실행 시 이전 진단 WAV를 덮어쓰지 않고 번호를 붙여 보존한다."""
+    pcm_a = np.full(2400, 0.1, dtype=np.float32)
+    pcm_b = np.full(2400, 0.2, dtype=np.float32)
+    p1 = probe.save_raw("dup", pcm_a, 24000, tmp_path)
+    p2 = probe.save_raw("dup", pcm_b, 24000, tmp_path)
+    assert p1 != p2
+    back1, _ = read_wav_f32(p1)
+    np.testing.assert_array_equal(back1, pcm_a)  # 첫 파일 무변경
+    back2, _ = read_wav_f32(p2)
+    np.testing.assert_array_equal(back2, pcm_b)
+    p3 = probe.save_raw("dup", pcm_a, 24000, tmp_path)
+    assert p3.name == "01_qwen_raw_24k_3.wav"
+
+
 # ---- fingerprint / tensor_diff
 
 def test_fingerprint_and_diff_identical():
@@ -132,19 +147,51 @@ def test_cmd_stt_not_run_without_ffmpeg(tmp_path, capsys):
 # ---- GPU 배터리 진입점은 CUDA/qwen_tts 없는 환경에서 NOT RUN
 
 def test_cmd_gpu_not_run_without_model(tmp_path, capsys, monkeypatch):
-    """모델 로더를 mock 처리한다. 비GPU 환경에서 실제 Qwen 모델 다운로드/로드 금지."""
+    """모델 로더를 mock 처리하고 실제로 Mock이 호출됐는지 검증한다.
+
+    비GPU 환경에서 실제 Qwen 모델 다운로드/로드/CUDA 초기화가 발생하지 않아야 하고,
+    참조 음성 검증이 통과한 경우에만 모델 로더가 호출된다."""
+    calls = {"real_adapter_init": 0}
+
     class _StubAdapter:
         def __init__(self, *args, **kwargs):
+            calls["real_adapter_init"] += 1
             raise RuntimeError("qwen_tts/torch 없음 (test stub)")
 
     monkeypatch.setattr(probe, "RealQwenAdapter", _StubAdapter)
+    monkeypatch.setattr(probe, "load_reference_via_probe",
+                        lambda repo, uuid: (np.zeros(2400, dtype=np.float32),
+                                            {"duration_s": 0.1}))
+    # CUDA 없는 개발 환경에서도 모델 로더 경로까지 도달하게 한다(실제 torch/CUDA 접근 없음).
+    monkeypatch.setattr(probe, "production_device", lambda: "cuda:0")
+    monkeypatch.setattr(probe, "ModelManager", lambda: type("MM", (), {"model_path": lambda self: "/fake/snapshot"})())
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
     repo, profile = _fake_profile(tmp_path)
     code = probe.cmd_gpu(repo, profile.uuid, tmp_path / "diag", None, 1)
     assert code == 3
-    assert "NOT RUN" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "NOT RUN" in out
+    assert calls["real_adapter_init"] == 1  # Mock(스텁) 로더가 실제로 호출됐음을 검증
+
+
+def test_cmd_gpu_reference_check_precedes_model_load(tmp_path, capsys, monkeypatch):
+    """FFmpeg·참조 음성 유효성 실패 시 모델을 적재하지 않고 NOT RUN으로 끝낸다."""
+    def _boom(repo, uuid):
+        raise probe.UnsupportedAudioError("ffmpeg 없음: third_party/bin 미설치")
+
+    class _StubAdapter:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("참조 검증 실패 상태에서 모델 로더가 호출되면 안 됩니다")
+
+    monkeypatch.setattr(probe, "RealQwenAdapter", _StubAdapter)
+    monkeypatch.setattr(probe, "load_reference_via_probe", _boom)
+    repo, profile = _fake_profile(tmp_path)
+    code = probe.cmd_gpu(repo, profile.uuid, tmp_path / "diag", None, 1)
+    assert code == 3
+    out = capsys.readouterr().out
+    assert "NOT RUN" in out and "ffmpeg 없음" in out
 
 
 def test_gpu_adapter_uses_local_snapshot_and_cuda(monkeypatch):
@@ -184,6 +231,26 @@ def test_probe_ffmpeg_adapter_uses_repo_third_party_bin(tmp_path, monkeypatch):
     assert adapter.ffmpeg == str(probe_bin / "ffmpeg.exe")
     assert adapter.ffprobe == str(probe_bin / "ffprobe.exe")
 
+
+def test_supported_params_probe_normal_and_kwargs():
+    def generate_voice_clone(self, text, language=None, voice_clone_prompt=None, **kwargs):
+        pass
+    res = probe.supported_params_probe(type("M", (), {"generate_voice_clone": generate_voice_clone})())
+    assert res["accepts_kwargs"] is True and res["error"] is None
+    assert "text" not in res["supported"]
+
+def test_supported_params_probe_signature_exception_initializes_accepts_kwargs(monkeypatch):
+    """inspect.signature 예외 시에도 accepts_kwargs가 초기화되어 있어야 한다."""
+    import inspect as _inspect
+    def _raise(*a, **k):
+        raise ValueError("signature 실패")
+    # supported_params_probe 내부의 import inspect와 동일 모듈 객체를 패치한다.
+    monkeypatch.setattr(_inspect, "signature", _raise)
+    class _M:
+        generate_voice_clone = staticmethod(lambda *a, **k: None)
+    res = probe.supported_params_probe(_M())
+    assert res["supported"] == [] and res["accepts_kwargs"] is False
+    assert res["error"] and "signature 실패" in res["error"]
 
 def test_gpu_param_probe_does_not_skip_kwargs_only_params():
     """시그니처에 이름이 없어도 **kwargs면 SKIP 근거로 쓰지 않는다."""
