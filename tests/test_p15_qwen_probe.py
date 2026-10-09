@@ -131,12 +131,70 @@ def test_cmd_stt_not_run_without_ffmpeg(tmp_path, capsys):
 
 # ---- GPU 배터리 진입점은 CUDA/qwen_tts 없는 환경에서 NOT RUN
 
-def test_cmd_gpu_not_run_without_model(tmp_path, capsys):
-    pytest.importorskip("torch") is None  # torch 없으면 이 테스트 skip
+def test_cmd_gpu_not_run_without_model(tmp_path, capsys, monkeypatch):
+    """모델 로더를 mock 처리한다. 비GPU 환경에서 실제 Qwen 모델 다운로드/로드 금지."""
+    class _StubAdapter:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("qwen_tts/torch 없음 (test stub)")
+
+    monkeypatch.setattr(probe, "RealQwenAdapter", _StubAdapter)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
     repo, profile = _fake_profile(tmp_path)
     code = probe.cmd_gpu(repo, profile.uuid, tmp_path / "diag", None, 1)
     assert code == 3
     assert "NOT RUN" in capsys.readouterr().out
+
+
+def test_gpu_adapter_uses_local_snapshot_and_cuda(monkeypatch):
+    """_gpu_adapter는 model_path 미지정 시 ModelManager 로컬 스냅샷을 쓰고,
+    production_device()로 CUDA를 명시한다(HF repo 자동 다운로드 없음)."""
+    calls = {}
+
+    class _StubAdapter:
+        def __init__(self, *, model_path, device):
+            calls["model_path"] = model_path
+            calls["device"] = device
+
+    monkeypatch.setattr(probe, "RealQwenAdapter", _StubAdapter)
+    monkeypatch.setattr(probe, "production_device", lambda: "cuda:0")
+    class _StubMM:
+        def model_path(self):
+            return "/fake/local/snapshot"
+
+    monkeypatch.setattr(probe, "ModelManager", _StubMM)
+    # model_path 지정: 그대로 사용, ModelManager 호출 없음
+    probe._gpu_adapter("/given/path")
+    assert calls == {"model_path": "/given/path", "device": "cuda:0"}
+    # model_path 미지정: 로컬 스냅샷 사용
+    probe._gpu_adapter(None)
+    assert calls == {"model_path": "/fake/local/snapshot", "device": "cuda:0"}
+
+
+def test_probe_ffmpeg_adapter_uses_repo_third_party_bin(tmp_path, monkeypatch):
+    """프로브 디코딩은 시스템 PATH가 아니라 repo third_party/bin을 명시 사용한다."""
+    monkeypatch.setenv("PATH", "")  # 시스템 PATH 의존 제거 검증
+    probe_bin = tmp_path / "third_party" / "bin"
+    probe_bin.mkdir(parents=True)
+    (probe_bin / "ffmpeg.exe").write_bytes(b"x")
+    (probe_bin / "ffprobe.exe").write_bytes(b"x")
+    monkeypatch.setattr(probe, "ROOT", tmp_path)
+    adapter = probe._probe_ffmpeg_adapter()
+    assert adapter.ffmpeg == str(probe_bin / "ffmpeg.exe")
+    assert adapter.ffprobe == str(probe_bin / "ffprobe.exe")
+
+
+def test_gpu_param_probe_does_not_skip_kwargs_only_params():
+    """시그니처에 이름이 없어도 **kwargs면 SKIP 근거로 쓰지 않는다."""
+    import inspect
+    def generate_voice_clone(self, text, language=None, voice_clone_prompt=None, **kwargs):
+        raise TypeError("unsupported argument")  # 실제 호출에서만 SKIP
+
+    sig = inspect.signature(generate_voice_clone)
+    accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    explicit = {p.name for p in sig.parameters.values()}
+    assert accepts_kwargs and "temperature" not in explicit
 
 
 # ---- 어댑터 계약 유지(FakeQwenAdapter generate 서명: language 옵트인)

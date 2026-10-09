@@ -40,6 +40,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from voice_studio.core import config
 from voice_studio.core.errors import ProfileError
 from voice_studio.infra.profile_repository import ProfileRepository
+from voice_studio.infra.qwen_adapter import production_device
+from voice_studio.services.model_manager import ModelManager
 from voice_studio.infra.qwen_adapter import MODEL_ID, RealQwenAdapter, VoiceClonePromptSpec
 from voice_studio.services.audio_diagnostics import _write_wav_f32, read_wav_f32
 
@@ -118,6 +120,14 @@ def load_spec(repo: ProfileRepository, uuid: str) -> tuple:
 
 # ---------------------------------------------------------------- 비-GPU 모드
 
+def _probe_ffmpeg_adapter():
+    """프로브 디코딩 전용 FFmpeg. 시스템 PATH에 의존하지 않고 repo third_party/bin을 명시 사용."""
+    from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter
+    repo_bin = ROOT / "third_party" / "bin"
+    return RealFfmpegAdapter(ffmpeg=str(repo_bin / "ffmpeg.exe"),
+                             ffprobe=str(repo_bin / "ffprobe.exe"))
+
+
 def cmd_list(repo: ProfileRepository) -> int:
     profiles = repo.list_profiles()
     if not profiles:
@@ -148,7 +158,7 @@ def cmd_inspect(repo: ProfileRepository, uuid: str, out_dir: Path) -> int:
     if flac.is_file():
         try:
             from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter
-            adapter = RealFfmpegAdapter()
+            adapter = _probe_ffmpeg_adapter()
             pcm = adapter.decode_segment(str(flac), 0.0, 1e9, config.REFERENCE_SAMPLE_RATE).astype(np.float32)
             path = save_raw("reference_from_profile", pcm, config.REFERENCE_SAMPLE_RATE, out_dir)
             print(f"reference.wav 저장: {path}")
@@ -165,7 +175,7 @@ def cmd_stt(repo: ProfileRepository, uuid: str) -> int:
     profile, _, _ = load_spec(repo, uuid)
     try:
         from voice_studio.infra.ffmpeg_adapter import RealFfmpegAdapter
-        adapter = RealFfmpegAdapter()
+        adapter = _probe_ffmpeg_adapter()
         pcm = adapter.decode_segment(str(repo.path_for(uuid) / "reference.flac"), 0.0, 1e9,
                                      config.REFERENCE_SAMPLE_RATE).astype(np.float32)
     except Exception as exc:
@@ -187,7 +197,16 @@ def cmd_stt(repo: ProfileRepository, uuid: str) -> int:
 # ---------------------------------------------------------------- GPU 배터리
 
 def _gpu_adapter(model_path: str | None) -> RealQwenAdapter:
-    return RealQwenAdapter(model_path=model_path, allow_repo_fallback=model_path is None)
+    """GPU 프로브 전용 어댑터. production 정책을 그대로 따른다.
+
+    - device는 production_device()(CUDA 없으면 GpuUnavailableError, CPU fallback 없음).
+      dtype은 RealQwenAdapter 내부 preferred_dtype(FP16/BF16) 정책을 그대로 사용.
+    - model_path 미지정 시 HF repo로 자동 다운로드하지 않고, 앱이 이미 받아둔
+      ModelManager 로컬 스냅샷을 사용한다(없으면 ModelNotDownloadedError → NOT RUN).
+    """
+    if model_path is None:
+        model_path = ModelManager().model_path()
+    return RealQwenAdapter(model_path=model_path, device=production_device())
 
 
 def _gen_and_save(adapter: RealQwenAdapter, label: str, spec: VoiceClonePromptSpec, text: str,
@@ -245,15 +264,20 @@ def cmd_gpu(repo: ProfileRepository, uuid: str, out_dir: Path, model_path: str |
         sig = inspect.signature(adapter._model.generate_voice_clone)
         supported = [p.name for p in sig.parameters.values()
                      if p.name not in ("self", "text", "language", "voice_clone_prompt")]
-        print(json.dumps({"step": "supported_params", "supported": supported}, ensure_ascii=False))
+        # **kwargs만으로 전달되는 샘플링 파라미터는 시그니처에 이름이 없어도
+        # 공식 API가 받을 수 있으므로 SKIP 판정 근거로 쓰지 않는다(실행 TypeError만 SKIP).
+        accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD
+                             for p in sig.parameters.values())
+        print(json.dumps({"step": "supported_params", "supported": supported,
+                          "accepts_kwargs": accepts_kwargs}, ensure_ascii=False))
     except (TypeError, ValueError) as exc:
         supported = []
         print(f"signature 확인 실패: {exc} [NOT RUN]")
 
     # (6) temperature/top_k/top_p 하나씩 변경(지원하는 것만)
     for name, values in (("temperature", [0.7, 1.3]), ("top_k", [20, 50]), ("top_p", [0.8, 0.95])):
-        if name not in supported:
-            print(f"{name}: 공식 시그니처에 없음 [SKIP]")
+        if name not in supported and not accepts_kwargs:
+            print(f"{name}: 공식 시그니처에 없음(확장 없음) [SKIP]")
             continue
         for value in values:
             try:
@@ -294,7 +318,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--inspect", metavar="UUID")
     ap.add_argument("--stt", metavar="UUID")
     ap.add_argument("--gpu", metavar="UUID")
-    ap.add_argument("--model-path", default=None, help="로컬 스냅샷 경로. 생략 시 HF repo fallback")
+    ap.add_argument("--model-path", default=None, help="로컬 모델 스냅샷 경로. 생략 시 앱이 받아둔 ModelManager 로컬 스냅샷 사용(HF 자동 다운로드 없음)")
     ap.add_argument("--runs", type=int, default=3, help="변동성 실험 반복 횟수")
     ap.add_argument("--out", default=str(DEFAULT_OUT))
     args = ap.parse_args(argv)
