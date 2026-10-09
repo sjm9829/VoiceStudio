@@ -58,12 +58,18 @@ class AudioService:
         head encoder delay(48kHz에서 576샘플 ≈ 12ms)와 마지막 frame padding이
         가드 무음으로 흡수되어, 첫 음절의 attack과 마지막 음절의 release가
         잘리지 않고 남는다.
+
+        P15: 24kHz→48kHz 리샘플링을 NumPy 전체 배열(Lanczos-3 polyphase)에서
+        FFmpeg swresample로 이전했다. 장문에서 NumPy가 만드는 출력 길이 비례
+        대형 중간 배열이 사라지고, FFmpeg의 고품질 resampler가 리샘플을 담당한다.
+        가드는 24kHz PCM에 20ms로 붙이고 리샘플 후에도 시간 길이가 보존된다.
         """
         if bitrate_kbps not in config.MP3_BITRATE_CHOICES:
             raise ValueError(f"지원하지 않는 음질: {bitrate_kbps}")
-        up = _resample_linear(pcm, config.REFERENCE_SAMPLE_RATE, config.OUTPUT_SAMPLE_RATE)
-        up = _pad_guard(up, config.OUTPUT_SAMPLE_RATE)
-        return self._adapter().encode_mp3(up, config.OUTPUT_SAMPLE_RATE, bitrate_kbps, out_path)
+        guarded = _pad_guard(pcm, config.REFERENCE_SAMPLE_RATE)
+        return self._adapter().encode_mp3(
+            guarded, config.REFERENCE_SAMPLE_RATE, bitrate_kbps, out_path,
+            out_sample_rate=config.OUTPUT_SAMPLE_RATE)
 
 # 무음 가드 길이(ms). LAME head encoder delay 576샘플(≈12ms @48kHz)보다 긴 20ms.
 GUARD_MS = 20
@@ -90,34 +96,35 @@ def _lanczos3(a: np.ndarray) -> np.ndarray:
 
 
 def _resample_linear(pcm: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
-    """Lanczos-3 창 sinc 리샘플(P14: 2-tap 선형 → 6-tap polyphase).
+    """Lanczos-3 창 sinc 리샘플(P14 도입, P15에서 production 경로는 FFmpeg 리샘플로 대체).
 
-    이름은 하위 호환(테스트 import)을 위해 유지한다. 출력 길이
-    n_out = int(size/src_rate*dst_rate)는 기존 np.interp 버전과 동일한 계약이다.
+    이름과 출력 길이 계약(n_out = int(size/src_rate*dst_rate))은 하위 호환을 위해
+    유지한다. P15: 출력을 블록 단위로 처리해 장문에서 대형 중간 배열 폭증을 막는다
+    (메모리 사용은 출력 블록 1개 + 입력 참조 창에 비례, 전체 출력에 비례하지 않음).
     무음(0)과 DC(상수) 입력은 가중치 합 1 정규화로 정확히 보존된다.
     """
     if src_rate == dst_rate or pcm.size == 0:
         return pcm.astype(np.float32)
-    duration = pcm.size / src_rate
-    n_out = int(duration * dst_rate)
-    x = pcm.astype(np.float64)
-    p = np.arange(n_out, dtype=np.float64) * (src_rate / dst_rate)
-    base = np.floor(p).astype(np.int64)
-    n_in = x.size
-    cols = []
-    weights = []
-    for off in range(-2, 4):  # 6-tap window: base-2 .. base+3
-        raw = base + off
-        w = _lanczos3(p - raw.astype(np.float64))
-        cols.append(np.clip(raw, 0, n_in - 1))
-        weights.append(w)
-    idx = np.stack(cols, axis=1)
-    wmat = np.stack(weights, axis=1)
-    total = wmat.sum(axis=1, keepdims=True)
-    total[total == 0] = 1.0
-    wmat = wmat / total
-    out = (x[idx] * wmat).sum(axis=1)
-    return out.astype(np.float32)
+    n_out = int(pcm.size / src_rate * dst_rate)
+    n_in = pcm.size
+    x = pcm  # float32 참조 유지: 전체 float64 사본을 만들지 않는다(P15 메모리 정리)
+    out = np.empty(n_out, dtype=np.float32)
+    block = 1 << 14
+    for start in range(0, n_out, block):
+        stop = min(start + block, n_out)
+        p = np.arange(start, stop, dtype=np.float64) * (src_rate / dst_rate)
+        base = np.floor(p).astype(np.int64)
+        cols, weights = [], []
+        for off in range(-2, 4):  # 6-tap window: base-2 .. base+3
+            raw = base + off
+            w = _lanczos3(p - raw.astype(np.float64))
+            cols.append(np.clip(raw, 0, n_in - 1))
+            weights.append(w)
+        wmat = np.stack(weights, axis=1)
+        total = wmat.sum(axis=1, keepdims=True)
+        total[total == 0] = 1.0
+        out[start:stop] = (x[np.stack(cols, axis=1)] * (wmat / total)).sum(axis=1, dtype=np.float64)
+    return out
 
 def concat_pcm(chunks: list[np.ndarray], sample_rate: int, gap_ms: int, paragraph_gap_ms: int, gap_flags: list[bool]) -> np.ndarray:
     """chunk PCM을 무음 간격과 함께 CPU에서 이어붙인다. gap_flags[i]=True면 문단 경계 간격."""

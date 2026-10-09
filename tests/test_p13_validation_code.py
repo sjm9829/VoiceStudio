@@ -401,11 +401,12 @@ def test_production_unchanged_by_this_commit():
     # production 계약 그대로: 2-인자 AudioService wrapper, RealFfmpegAdapter() 무인자 생성.
     assert "AudioService(RealFfmpegAdapter())" in wm
     assert "def encode_wav(self, pcm: np.ndarray, sample_rate: int, out_path: str)" in fa
-    # HEAD(이 정정 커밋) name-only에 production 파일이 없어야 한다.
-    import subprocess as sp
-    r = sp.run(["git", "show", "--name-only", "--format=", "HEAD"],
-               cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
-    names = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
-    for prod in ("src/voice_studio/workers/worker_main.py",
-                 "src/voice_studio/infra/ffmpeg_adapter.py"):
-        assert prod not in names, f"{prod}가 이 커밋에서 변경됨: {names}"
+    # HEAD name-only 가드는 커밋 직후 자동으로 깨지는 구조라 제거(P14에서 확인).
+    # 대신 현재 production 계약을 직접 검증한다(P15).
+    assert "AudioService(RealFfmpegAdapter())" in wm  # 무인자 생성 유지
+    assert 'os.environ.get("VOICE_STUDIO_DIAGNOSTICS_DIR")' in wm  # 진단은 env 옵트인만
+    import inspect
+    params = inspect.signature(__import__(
+        "voice_studio.infra.ffmpeg_adapter", fromlist=["RealFfmpegAdapter"]
+    ).RealFfmpegAdapter.encode_mp3).parameters
+    assert params["out_sample_rate"].default is None  # 기존 4-인자 호출 호환

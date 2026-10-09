@@ -57,16 +57,18 @@ def test_resample_24k_to_48k():
 # ---- P14 regression: 무음 가드 + Lanczos-3 리샘플 ----
 
 def test_encode_mp3_guard_padding(tmp_path):
-    """encode_mp3는 48kHz로 업샘플 후 앞뒤 20ms(960샘플) 무음 가드를 붙인다."""
+    """P15: encode_mp3는 24kHz PCM에 앞뒤 20ms(480샘플) 가드를 붙여 어댑터에 24k로 전달하고,
+    48kHz 출력은 FFmpeg 리샘플(out_sample_rate)에 맡긴다."""
     fake = FakeFfmpegAdapter(duration=30.0)
     svc = AudioService(fake)
     pcm = np.zeros(24000, dtype=np.float32)  # 24kHz 1초
     svc.encode_mp3(pcm, 192, str(tmp_path / "g.mp3"))
     bitrate, out, size, sr = fake.mp3_encoded[-1]
     assert bitrate == 192 and out.endswith("g.mp3")
-    assert sr == 48000
-    # 1s @48k = 48000 + head 20ms(960) + tail 20ms(960)
-    assert size == 48000 + 960 + 960
+    # 어댑터는 24kHz 입력을 받는다(리샘플은 FFmpeg가 out_sample_rate=48000으로 수행).
+    assert sr == 24000
+    # 1s @24k = 24000 + head 20ms(480) + tail 20ms(480)
+    assert size == 24000 + 480 + 480
 
 
 def test_encode_mp3_empty_pcm_stays_empty(tmp_path):
@@ -74,7 +76,7 @@ def test_encode_mp3_empty_pcm_stays_empty(tmp_path):
     svc = AudioService(fake)
     svc.encode_mp3(np.zeros(0, np.float32), 128, str(tmp_path / "e.mp3"))
     _, _, size, sr = fake.mp3_encoded[-1]
-    assert size == 0 and sr == 48000
+    assert size == 0 and sr == 24000
 
 
 def test_lanczos_preserves_integer_grid_samples():

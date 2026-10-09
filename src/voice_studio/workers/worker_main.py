@@ -109,9 +109,16 @@ def run_narrate(job) -> None:
         failed_chunks=[], output_path=None)
     prompt = service.load_prompt_spec(job.profile_uuid)
     emit(status_event("generating", job_id=job.job_id, total=len(job.segments)))
+    # P15: VOICE_STUDIO_DIAGNOSTICS_DIR 환경 변수를 명시한 경우에만 진단 파일을 남긴다.
+    # VOICE_STUDIO_TTS_LANGUAGE로 공식 language 인자를 옵트인한다(기본 None = Auto 유지).
+    import os
+    diagnostics_dir = os.environ.get("VOICE_STUDIO_DIAGNOSTICS_DIR") or None
+    tts_language = os.environ.get("VOICE_STUDIO_TTS_LANGUAGE") or None
     out = narration.generate(
         gen_job, prompt, output_path=job.output_path, bitrate_kbps=job.bitrate_kbps,
-        on_progress=lambda kind, i, total: emit(progress_event(i, total, kind=kind, job_id=job.job_id)))
+        diagnostics_dir=diagnostics_dir,
+        on_progress=lambda kind, i, total: emit(progress_event(i, total, kind=kind, job_id=job.job_id)),
+        tts_language=tts_language)
     emit(result_event(out, job_id=job.job_id, result_type="audio"))
 
 

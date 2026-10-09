@@ -16,6 +16,7 @@ from ..infra.profile_repository import ProfileRepository
 from ..infra.qwen_adapter import VoiceClonePromptSpec, QwenAdapter
 from ..services.text_segmenter import segment_with_flags
 from ..services.audio_service import AudioService, concat_pcm
+from ..services.audio_diagnostics import DiagnosticsCapture
 
 class NarrationService:
     """worker 프로세스 내부에서 실제 생성을 수행하는 쪽(QwenAdapter 주입)."""
@@ -37,10 +38,16 @@ class NarrationService:
 
     def generate(self, job: GenerationJob, prompt: VoiceClonePromptSpec, *,
                  cancel_check=None, on_progress=None, output_path: str, bitrate_kbps: int,
-                 gap_ms: int = config.CHUNK_GAP_MS, paragraph_gap_ms: int = config.PARAGRAPH_GAP_MS) -> str:
-        """chunk를 순차 생성해 하나의 MP3로 완성한다. 동일 VoiceClonePromptItem 사용."""
+                 gap_ms: int = config.CHUNK_GAP_MS, paragraph_gap_ms: int = config.PARAGRAPH_GAP_MS,
+                 diagnostics_dir: str | None = None, tts_language: str | None = None) -> str:
+        """chunk를 순차 생성해 하나의 MP3로 완성한다. 동일 VoiceClonePromptItem 사용.
+
+        diagnostics_dir를 명시한 경우에만 진단 WAV/MP3 사본을 남긴다(P15).
+        기본(None)에서는 추가 파일을 만들지 않는다.
+        """
         if not prompt.ref_text.strip():
             raise ProfileError("프로필의 참조 대사가 비어 있습니다.")
+        diag = DiagnosticsCapture(self.audio, diagnostics_dir, job.job_id)
         chunks: list[np.ndarray] = []
         total = len(job.segments)
         for i, text in enumerate(job.segments):
@@ -50,14 +57,25 @@ class NarrationService:
             if on_progress is not None:
                 on_progress("generating", i + 1, total)
             try:
-                chunks.append(self.qwen.generate(prompt, text, config.REFERENCE_SAMPLE_RATE))
+                chunks.append(self.qwen.generate(prompt, text, config.REFERENCE_SAMPLE_RATE, language=tts_language))
             except Exception as exc:
                 job.failed_chunks.append(i)
                 raise WorkerError(f"{i + 1}번째 구간 생성 실패: {exc}") from exc
         if on_progress is not None:
             on_progress("encoding", total, total)
         pcm = concat_pcm(chunks, config.REFERENCE_SAMPLE_RATE, gap_ms, paragraph_gap_ms, job_gap_flags(job))
+        if diag.enabled:
+            # 01: 모델 원본(청크 결합만, 무음 간격 없음/리샘플·정규화 없음), 02: 최종 인코딩 직전(가드 포함).
+            from ..services.audio_service import _pad_guard
+            diag.save_qwen_raw(pcm)
+            diag.save_pre_encode(_pad_guard(pcm, config.REFERENCE_SAMPLE_RATE))
         out = self.audio.encode_mp3(pcm, bitrate_kbps, output_path)
+        if diag.enabled:
+            diag.save_final(out)
+            try:
+                diag.save_mp3_decoded(out)
+            except Exception:
+                pass  # 04는 ffmpeg 재디코딩이 필요하므로 진단 보조 파일 실패가 본 결과를 막지 않는다
         if on_progress is not None:
             on_progress("done", total, total)
         job.status = JobStatus.COMPLETED

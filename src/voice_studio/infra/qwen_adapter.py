@@ -87,7 +87,8 @@ class QwenAdapter(Protocol):
     model_version: str
 
     def create_prompt(self, waveform: np.ndarray, sample_rate: int, ref_text: str) -> VoiceClonePromptSpec: ...
-    def generate(self, prompt: VoiceClonePromptSpec, text: str, sample_rate: int) -> np.ndarray: ...
+    def generate(self, prompt: VoiceClonePromptSpec, text: str, sample_rate: int,
+                 language: str | None = None) -> np.ndarray: ...
 
 def default_device() -> str:
     """CUDA가 가능하면 cuda:0, 아니면 cpu. dev tooling/테스트용."""
@@ -197,8 +198,14 @@ class RealQwenAdapter:
             x_vector_only_mode=bool(item.x_vector_only_mode), icl_mode=bool(item.icl_mode),
             ref_text=ref_text)
 
-    def generate(self, prompt: VoiceClonePromptSpec, text: str, sample_rate: int) -> np.ndarray:
-        """공식 VoiceClonePromptItem을 재구성해 list로 전달한다(ref_text 포함)."""
+    def generate(self, prompt: VoiceClonePromptSpec, text: str, sample_rate: int,
+                 language: str | None = None) -> np.ndarray:
+        """공식 VoiceClonePromptItem을 재구성해 list로 전달한다(ref_text 포함).
+
+        language는 qwen-tts 공식 인자(qwen-tts 0.1.1 generate_voice_clone 시그니처 확인).
+        None이면 공식 기본("Auto") 동작을 유지한다. P15: RTX 실기에서 기본값과
+        language="Korean"을 A/B 비교하기 위한 옵트인이며, 기본 동작은 무변경이다.
+        """
         from qwen_tts import VoiceClonePromptItem  # 공식 export
         item = VoiceClonePromptItem(
             ref_code=_from_numpy(prompt.ref_code),
@@ -207,7 +214,7 @@ class RealQwenAdapter:
             icl_mode=prompt.icl_mode,
             ref_text=prompt.ref_text or None,
         )
-        wavs, out_sr = self._model.generate_voice_clone(text, voice_clone_prompt=[item])
+        wavs, out_sr = self._model.generate_voice_clone(text, language=language, voice_clone_prompt=[item])
         # GPU tensor를 즉시 CPU numpy로 이동(VRAM 고정 해제, GPU 정정 지시 반영)
         wav = np.asarray(_to_numpy(wavs[0]), dtype=np.float32).reshape(-1)
         if int(out_sr) != int(sample_rate):
@@ -235,7 +242,8 @@ class FakeQwenAdapter:
             ref_spk_embedding=np.full(256, peak, dtype=np.float32),
             x_vector_only_mode=False, icl_mode=True, ref_text=ref_text)
 
-    def generate(self, prompt: VoiceClonePromptSpec, text: str, sample_rate: int) -> np.ndarray:
+    def generate(self, prompt: VoiceClonePromptSpec, text: str, sample_rate: int,
+                 language: str | None = None) -> np.ndarray:
         self.calls.append(text)
         seconds = max(0.4, len(text) * 0.08)
         t = np.arange(int(seconds * sample_rate), dtype=np.float32) / sample_rate
