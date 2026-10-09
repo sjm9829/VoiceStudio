@@ -26,7 +26,7 @@ from ..core.errors import (VoiceStudioError, ProfileError, DuplicateNameError,
                            UnsupportedAudioError)
 from ..core.paths import logs_dir, preview_cache_dir
 from ..workers.job_schema import build_register_payload
-from ..workers.launcher import worker_command
+from ..workers.launcher import apply_no_window, worker_command
 from ..workers.linebuffer import JsonlBuffer
 from .waveform_widget import WaveformWidget
 
@@ -456,6 +456,7 @@ class VoiceEditorDialog(QDialog):
             self._error_message = None
             program, args = worker_command(str(job_file))
             self._worker = QProcess(self)
+            apply_no_window(self._worker)
             self._worker.readyReadStandardOutput.connect(self._on_worker_output)
             self._worker.readyReadStandardError.connect(self._on_worker_stderr)
             self._worker.finished.connect(self._on_register_finished)

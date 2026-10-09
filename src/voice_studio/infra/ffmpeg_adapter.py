@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Protocol
 import numpy as np
 from ..core.errors import FfmpegNotFoundError, UnsupportedAudioError
+from .subprocess_runner import run as _run_no_window
 
 SUPPORTED_SUFFIXES = (".mp3", ".m4a", ".wav", ".flac")
 
@@ -103,7 +104,7 @@ class RealFfmpegAdapter:
         드물게 비정상 바이트가 나와도 exception 대신 안전히 대체한다.
         raw PCM(f32le stdout/stdin) 경로는 text=True를 쓰지 않는다.
         """
-        return subprocess.run(args, capture_output=True, text=True,
+        return _run_no_window(args, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=300)
 
     def probe(self, path: str) -> dict:
@@ -163,7 +164,7 @@ class RealFfmpegAdapter:
         args = [self.ffmpeg, "-v", "error", "-ss", f"{start_s:.3f}", "-i", path,
                 "-t", f"{duration_s:.3f}",
                 "-f", "f32le", "-ac", "1", "-ar", str(sample_rate), "-"]
-        r = subprocess.run(args, capture_output=True, timeout=300)
+        r = _run_no_window(args, capture_output=True, timeout=300)
         if r.returncode != 0:
             stderr = r.stderr.decode(errors="replace")[:300]
             _log.warning("decode_segment 실패: path=%r start=%s end=%s returncode=%s stderr=%s",
@@ -184,7 +185,7 @@ class RealFfmpegAdapter:
     def waveform(self, path: str, buckets: int) -> list[float]:
         """전체 파일을 저해상도 mono 8kHz f32로 디코딩해 peak envelope 버킷으로 축소."""
         args = [self.ffmpeg, "-v", "error", "-i", path, "-f", "f32le", "-ac", "1", "-ar", "8000", "-"]
-        r = subprocess.run(args, capture_output=True, timeout=600)
+        r = _run_no_window(args, capture_output=True, timeout=600)
         if r.returncode != 0:
             stderr = r.stderr.decode(errors="replace")[:300]
             _log.warning("waveform 실패: path=%r returncode=%s stderr=%s", path, r.returncode, stderr)
@@ -203,7 +204,7 @@ class RealFfmpegAdapter:
         raw = np.clip(pcm, -1.0, 1.0).astype(np.float32).tobytes()
         args = [self.ffmpeg, "-y", "-v", "error", "-f", "f32le", "-ar", str(sample_rate),
                 "-ac", "1", "-i", "-", "-codec:a", "pcm_s16le", out_path]
-        r = subprocess.run(args, input=raw, capture_output=True, timeout=300)
+        r = _run_no_window(args, input=raw, capture_output=True, timeout=300)
         if r.returncode != 0:
             raise UnsupportedAudioError(r.stderr.decode(errors="replace")[:300])
         return out_path
@@ -223,7 +224,7 @@ class RealFfmpegAdapter:
         if out_sample_rate:
             args += ["-ar", str(out_sample_rate)]
         args.append(out_path)
-        r = subprocess.run(args, input=raw, capture_output=True, timeout=600)
+        r = _run_no_window(args, input=raw, capture_output=True, timeout=600)
         if r.returncode != 0:
             raise UnsupportedAudioError(r.stderr.decode(errors="replace")[:300])
         return out_path

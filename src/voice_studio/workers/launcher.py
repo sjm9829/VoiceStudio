@@ -7,6 +7,28 @@
 from __future__ import annotations
 import sys
 
+
+def apply_no_window(qprocess) -> None:
+    """QProcess로 콘솔 자식 프로세스를 띄울 때 Windows 창 생성을 막는다(P17-A).
+
+    개발 모드에서 worker는 python.exe(콘솔 앱)이므로 검은 CMD 창이 깜빡인다.
+    PySide6가 setCreateProcessArgumentsModifier를 지원하는 환경에서만
+    CREATE_NO_WINDOW를 적용하고, 미지원 플랫폼/API에서는 아무것도 하지 않는다.
+    stdout/stderr 수집과 종료 코드 처리에는 영향이 없다.
+    """
+    if sys.platform != "win32":
+        return
+    modifier = getattr(qprocess, "setCreateProcessArgumentsModifier", None)
+    if modifier is None:
+        return
+
+    import subprocess
+
+    def _patch(args):
+        args["creationflags"] = args.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+
+    modifier(_patch)
+
 def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 

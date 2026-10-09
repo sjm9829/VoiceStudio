@@ -111,11 +111,11 @@ class SettingsDialog(QDialog):
         않도록(구조 계약) 자식 인터프리터로 진단을 실행하고 요약만 받아 표시한다.
         세부 기술 정보는 logs/diagnosis.log에만 남긴다.
         """
-        import subprocess
-        from ..workers.launcher import diagnostics_command
+        from ..infra.subprocess_runner import run as _run_no_window
+        from ..workers.launcher import apply_no_window, diagnostics_command
         try:
             program, dargs = diagnostics_command()
-            r = subprocess.run([program, *dargs],
+            r = _run_no_window([program, *dargs],
                                capture_output=True, text=True, timeout=90,
                                cwd=str(Path(__file__).resolve().parents[2]))
             out = (r.stdout or "").strip().splitlines()

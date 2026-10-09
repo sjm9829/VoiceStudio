@@ -10,11 +10,13 @@ import datetime
 import json
 import subprocess
 
+from .infra.subprocess_runner import run as _run_no_window
+
 
 def _gpu_lines() -> dict[str, str]:
     lines: dict[str, str] = {}
     try:
-        r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total",
+        r = _run_no_window(["nvidia-smi", "--query-gpu=name,memory.total",
                             "--format=csv,noheader"], capture_output=True, text=True, timeout=10)
         gpu = r.stdout.strip().splitlines()[0] if r.stdout.strip() else ""
         lines["그래픽 카드"] = f"NVIDIA {gpu}" if gpu else "NVIDIA 그래픽 카드를 찾을 수 없습니다."

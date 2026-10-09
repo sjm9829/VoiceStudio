@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, Q
 from ..core.errors import VoiceStudioError, ProfileError, ModelNotDownloadedError
 from ..core.paths import logs_dir
 from ..workers.job_schema import build_narrate_payload
-from ..workers.launcher import worker_command
+from ..workers.launcher import apply_no_window, worker_command
 from ..core.paths import safe_job_cache_dir
 from ..workers.linebuffer import JsonlBuffer
 from .voice_manager_dialog import VoiceManagerDialog
@@ -200,6 +200,7 @@ class MainWindow(QMainWindow):
             self._result_received = False
             program, args = worker_command(str(job_file))
             self._worker = QProcess(self)
+            apply_no_window(self._worker)
             self._worker.readyReadStandardOutput.connect(self._on_worker_output)
             self._worker.readyReadStandardError.connect(self._on_worker_stderr)
             self._worker.finished.connect(self._on_worker_finished)
