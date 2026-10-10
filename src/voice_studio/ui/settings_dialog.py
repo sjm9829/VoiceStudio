@@ -94,7 +94,11 @@ class SettingsDialog(QDialog):
         self.backend_combo.currentIndexChanged.connect(self._backend_changed)
         backend_row.addWidget(self.backend_combo, 1)
         model_layout.addLayout(backend_row)
-        self.model_label = QLabel(context.model_manager.status_text())
+        from ..services.gguf_model_manager import GgufModelManager
+        _saved = str(context.settings.get("tts_backend", "official"))
+        self.model_label = QLabel(
+            GgufModelManager().status_text() if _saved == "gguf"
+            else context.model_manager.status_text())
         model_layout.addWidget(self.model_label)
         dl = QPushButton("모델 받기")
         dl.clicked.connect(self.download_model)
