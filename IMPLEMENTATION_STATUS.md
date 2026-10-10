@@ -574,3 +574,15 @@ CUDA 강제, worker stderr logging, UI detail 비노출, -ss+-t segment 계약)�
 ### NOT RUN (Windows 실기 필요)
 - `build_windows.bat` 빌드, frozen smoke, 설치, E2E(등록→재시작→나레이션→재생→MP3), VRAM 실측,
   RTX 2070 SUPER에서 `-ngl` 튜닝, gguf 기본값 전환 판단.
+
+
+## P18 Final Hotfix (2026-10, master)
+
+- F1 `c03ca0c`: 생성 경로 자동 트리밍 제거, llama-tts 원본 PCM 전체 보존(24k→48k 리샘플/MP3 구조 유지), 진단 아티팩트 정리.
+- F2 `7eb324c`: 앱 시작·목소리 등록·음성 생성 전 경로 모두 모델/엔진 자동 준비, 단일 공유 다운로드 작업, 백그라운드 해시 검증, 창 종료 시 스레드 join, 실패 시 재시도.
+- F3 `8d59129`: HF 실수신 바이트 기반 진행률(모델+mmproj 합산, resume 누계, verify 단계 분리 표시). 실다운로드 2.29GB 검증 완료.
+- F4/F5 `7eb324c`: 메인 화면 저장 위치 표시·변수화, MP3 파일명 생성 시점 프로필 스냅샷, 덮어쓰기 없는 `_2` 충돌 회피.
+- F6 `58c2f0c`: 빌드에서 torch/qwen-tts/transformers 제거(gguf+faster-whisper만), check_runtime_packages를 gguf 계약으로 교체.
+- F7 `7729ef6`: Linux 심링크 untrack, prepare_ffmpeg 단일 경로.
+- F8 `fdbbf5b`: frozen 재다운로드는 사용자 데이터 경로(%LOCALAPPDATA%)에만 수행, 번들 엔진 읽기 전용 사용.
+- 미검증(NOT RUN, Windows/GPU 실기): build_windows.bat 빌드, frozen smoke, 설치본 E2E, RTX 2070 VRAM 실측, 음질 비교.

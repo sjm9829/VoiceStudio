@@ -8,12 +8,13 @@ Windows 일반 사용자를 위한 로컬 전용 음성 복제·나레이션 생
 ## 핵심 사용 흐름
 1. `목소리 관리`에서 참조 음성 파일(MP3/M4A/WAV/FLAC)과 그 대사를 등록합니다.
 2. 메인 `나레이션` 화면에서 목소리를 선택하고 대본을 입력합니다.
-3. `음성 생성`을 누르면 구간별 생성 후 하나의 MP3로 완성됩니다.
+3. `음성 생성`을 누르면 구간별 생성 후 하나의 MP3(192kbps/mono/48kHz)로 완성됩니다. 모델이 없으면 백그라운드에서 자동 준비됩니다.
 4. 내장 재생으로 들어보고 `MP3 저장`으로 내보냅니다.
 
 ## 기술 스택
 - Python 3.12, PySide6 (Windows 데스크톱 UI)
-- 음성 복제: Qwen 공식 `Qwen/Qwen3-TTS-12Hz-0.6B-Base` (ICL 모드, `x_vector_only_mode=False`)
+- 음성 복제: Qwen3-TTS 1.7B Q8_0 GGUF 단일 백엔드(llama.cpp `b11540`, `llama-tts`, GPU `-ngl 12`/`-c 4096`)
+  - 모델·엔진은 앱 시작/등록/생성 시 자동 확인·다운로드되며, 사용자 조작이 필요 없습니다.
 - 오디오 입출력: FFmpeg/ffprobe (최종 출력은 MP3, mono, 48kHz)
 - 자동 받아쓰기: faster-whisper `small`, `compute_type=int8`, CPU 전용
 - 배포: PyInstaller `onedir` + Inno Setup
@@ -63,7 +64,7 @@ voice-studio/
 
 ## 개인정보 로컬 처리
 - 참조 음성, 대사, 생성 결과는 `%LOCALAPPDATA%\VoiceStudio\` 아래에만 저장됩니다.
-- 모델 다운로드(Hugging Face) 시에만 네트워크를 사용하며, 그 외 동작은 로컬입니다.
+- 모델·엔진 다운로드(Hugging Face/GitHub release) 시에만 네트워크를 사용하며, 그 외 동작은 로컬입니다.
 
 ## 라이선스
 - 애플리케이션 코드: MIT (`LICENSE`)
