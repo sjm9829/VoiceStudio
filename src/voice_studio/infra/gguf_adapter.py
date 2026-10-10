@@ -125,9 +125,24 @@ class GgufQwenAdapter:
             engine_path=self.engine_path,
         )
 
-    def prepare_speaker(self, prompt: GgufPromptSpec, speaker_wav: str | Path) -> GgufPromptSpec:
-        """narrate 워커가 저장된 참조 음성 경로를 prompt에 연결한다(새 spec 반환)."""
+    def prepare_speaker(self, prompt, speaker_wav: str | Path):
+        """narrate 워커가 저장된 참조 음성 경로를 prompt에 연결한다(새 spec 반환).
+
+        official VoiceClonePromptSpec이 들어오면 gguf spec으로 변환한다(텐서는 미사용).
+        """
         import dataclasses
+        from .qwen_adapter import VoiceClonePromptSpec
+        if isinstance(prompt, VoiceClonePromptSpec):
+            prompt = GgufPromptSpec(
+                ref_text=getattr(prompt, "ref_text", ""),
+                language=self.language,
+                ngpu_layers=self.ngpu_layers,
+                temp=self.temp,
+                top_k=self.top_k,
+                top_p=self.top_p,
+                model_dir=self.model_dir,
+                engine_path=self.engine_path,
+            )
         return dataclasses.replace(prompt, speaker_wav=str(speaker_wav))
 
     def generate(self, prompt: GgufPromptSpec, text: str, sample_rate: int,

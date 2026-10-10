@@ -321,3 +321,40 @@ def test_download_writes_complete_marker_contract():
     i_marker = src.index('(tmp / ".complete").write_text(')
     i_swap = src.index("tmp.rename(self.cache_dir)")
     assert i_verify < i_marker < i_swap
+
+
+def test_prepare_speaker_accepts_official_prompt_spec():
+    """narrate worker는 공용 VoiceClonePromptSpec을 넘긴다 - gguf spec으로 변환되어야 한다."""
+    import numpy as _np
+    adapter = GgufQwenAdapter(model_dir="/tmp/m", engine_path="/tmp/llama-tts")
+    from voice_studio.infra.qwen_adapter import VoiceClonePromptSpec
+    official = VoiceClonePromptSpec(
+        ref_code=_np.zeros(3, dtype=_np.int32), ref_spk_embedding=_np.ones(4, dtype=_np.float32),
+        ref_text="공용 대사")
+    out = adapter.prepare_speaker(official, "/tmp/spk.wav")
+    assert isinstance(out, GgufPromptSpec)
+    assert out.speaker_wav == "/tmp/spk.wav"
+    assert out.ref_text == "공용 대사"
+    # 이미 gguf spec이면 그대로 경로만 교체
+    gg = GgufPromptSpec(ref_text="gg")
+    out2 = adapter.prepare_speaker(gg, "/x.wav")
+    assert out2.speaker_wav == "/x.wav" and out2.ref_text == "gg"
+
+
+def test_prepare_speaker_accepts_official_prompt_spec():
+    from voice_studio.infra.gguf_adapter import GgufQwenAdapter, GgufPromptSpec
+    """narrate worker는 공용 VoiceClonePromptSpec을 넘긴다 - gguf spec으로 변환되어야 한다."""
+    import numpy as _np
+    adapter = GgufQwenAdapter(model_dir="/tmp/m", engine_path="/tmp/llama-tts")
+    from voice_studio.infra.qwen_adapter import VoiceClonePromptSpec
+    official = VoiceClonePromptSpec(
+        ref_code=_np.zeros(3, dtype=_np.int32), ref_spk_embedding=_np.ones(4, dtype=_np.float32),
+        ref_text="공용 대사")
+    out = adapter.prepare_speaker(official, "/tmp/spk.wav")
+    assert isinstance(out, GgufPromptSpec)
+    assert out.speaker_wav == "/tmp/spk.wav"
+    assert out.ref_text == "공용 대사"
+    # 이미 gguf spec이면 그대로 경로만 교체
+    gg = GgufPromptSpec(ref_text="gg")
+    out2 = adapter.prepare_speaker(gg, "/x.wav")
+    assert out2.speaker_wav == "/x.wav" and out2.ref_text == "gg"
