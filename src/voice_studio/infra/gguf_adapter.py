@@ -109,7 +109,11 @@ class GgufQwenAdapter:
     # -- QwenAdapter 계약 --
     def create_prompt(self, waveform: np.ndarray, sample_rate: int, ref_text: str) -> GgufPromptSpec:
         """참조 pcm을 24kHz mono wav로 캐시해 --tts-speaker-file 경로를 준비한다."""
+        # 저장 계약(safetensors ref_code/ref_spk_embedding)을 채우기 위한 최소 placeholder.
+        # 0.6B 텐서가 아니며 gguf는 이를 생성 단계에서 사용하지 않는다(재사용 아님).
         return GgufPromptSpec(
+            ref_code=np.zeros(1, dtype=np.float32),
+            ref_spk_embedding=np.zeros(1, dtype=np.float32),
             speaker_wav="",  # generate에서 job temp로 채워짐(직렬화 안 함)
             ref_text=ref_text,
             language=self.language,
