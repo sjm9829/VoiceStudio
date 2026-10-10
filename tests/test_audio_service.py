@@ -74,7 +74,7 @@ def test_encode_mp3_guard_padding(tmp_path):
 def test_encode_mp3_empty_pcm_stays_empty(tmp_path):
     fake = FakeFfmpegAdapter(duration=30.0)
     svc = AudioService(fake)
-    svc.encode_mp3(np.zeros(0, np.float32), 128, str(tmp_path / "e.mp3"))
+    svc.encode_mp3(np.zeros(0, np.float32), 192, str(tmp_path / "e.mp3"))  # P18-7: 192 고정
     _, _, size, sr = fake.mp3_encoded[-1]
     assert size == 0 and sr == 24000
 

@@ -90,19 +90,21 @@ def test_new_generation_deletes_previous_success_cache(qtbot, tmp_path, monkeypa
 
 
 def test_save_mp3_moves_pointer_and_deletes_cache(qtbot, tmp_path, monkeypatch):
+    """P18-8: 자동 파일명 저장. QFileDialog 없이 목소리명_시각.mp3로 저장한다."""
     win = _make_window(qtbot, tmp_path)
     job_dir = tmp_path / "jobs" / "j1"; job_dir.mkdir(parents=True)
     src = job_dir / "result.mp3"; src.write_bytes(b"data")
-    target = tmp_path / "out" / "saved.mp3"; target.parent.mkdir(parents=True)
-    win._job_dir = job_dir
-    win._last_output = str(src)
-    monkeypatch.setattr("voice_studio.ui.main_window.QFileDialog.getSaveFileName",
-                        staticmethod(lambda *a, **k: (str(target), "")))
+    out_dir = tmp_path / "out"; out_dir.mkdir()
+    win.context.settings["mp3_output_dir"] = str(out_dir)
+    monkeypatch.setattr(type(win.voice_combo), "currentText", lambda self: "테스트음색", raising=False)
     monkeypatch.setattr("voice_studio.ui.main_window.QMessageBox.information",
                         staticmethod(lambda *a, **k: None))
+    win._job_dir = job_dir
+    win._last_output = str(src)
     win.save_mp3()
-    assert target.read_bytes() == b"data"
-    assert win._last_output == str(target)   # 사용자 파일로 교체
+    saved = list(out_dir.glob("테스트음색_*.mp3"))
+    assert len(saved) == 1 and saved[0].read_bytes() == b"data"
+    assert str(win._last_output) == str(saved[0])  # 저장 파일로 교체
     assert not job_dir.exists()              # 캐시 job 폴더 삭제
 
 

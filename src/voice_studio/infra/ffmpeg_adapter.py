@@ -62,14 +62,31 @@ def bundled_bin_dir() -> "Path | None":
     dirs = bundled_bin_dirs()
     return dirs[0] if dirs else None
 
+def _project_third_party_bin() -> "Path | None":
+    """P18-10: 소스 실행 시 저장소 루트의 third_party/bin도 탐색한다.
+
+    개발 환경에서 PATH 미등록 이유로 오류가 나지 않게 프로젝트 내 ffmpeg를 쓴다.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        cand = parent / "third_party" / "bin"
+        if cand.is_dir():
+            return cand
+    return None
+
 def _resolve_binary(name: str, override: str | None) -> str | None:
-    """탐색 우선순위: 1) 앱 설치 디렉터리에 포함된 바이너리, 2) 시스템 PATH."""
+    """탐색 순위: override → 설치본 bin → 저장소 third_party/bin → PATH."""
     if override:
         return override
     for bundled in bundled_bin_dirs():
         candidate = bundled / f"{name}.exe"
         if candidate.is_file():
             return str(candidate)
+    tp = _project_third_party_bin()
+    if tp is not None:
+        for cand in (tp / f"{name}.exe", tp / name):
+            if cand.is_file():
+                return str(cand)
     return shutil.which(name)
 
 class RealFfmpegAdapter:

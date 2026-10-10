@@ -15,7 +15,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QProcess, QTimer, QUrl, Signal
+from PySide6.QtCore import Qt, QProcess, QTimer, QUrl, Signal, QObject
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
                                QPushButton, QPlainTextEdit, QLabel, QFileDialog, QMessageBox,
@@ -23,13 +23,14 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, Q
 from .theme import (BG, CARD, BORDER, TEXT, MUTED, PRIMARY, PRIMARY_HOVER, DANGER,
                     SUCCESS, SELECT_BG, make_card, step_label, hint_label, primary_button)
 from ..core.errors import VoiceStudioError, ProfileError, ModelNotDownloadedError
+from ..core import config
+from ..core.paths import default_mp3_dir
 from ..core.paths import logs_dir
 from ..workers.job_schema import build_narrate_payload
 from ..workers.launcher import apply_no_window, worker_command
 from ..core.paths import safe_job_cache_dir
 from ..workers.linebuffer import JsonlBuffer
 from .voice_manager_dialog import VoiceManagerDialog
-from .settings_dialog import SettingsDialog
 
 PHASE_KO = {
     "model_loading": "모델을 준비하는 중…",
@@ -39,6 +40,26 @@ PHASE_KO = {
     "encoding": "MP3를 만드는 중…",
     "done": "완료",
 }
+
+class _ModelPrepareWorker(QObject):
+    """P18-5: 백그라운드에서 모델+엔진 준비. progress(dict), finished(bool,str) 시그널."""
+
+    progress = Signal(dict)
+    finished = Signal(bool, str)
+
+    def __init__(self, model_manager):
+        super().__init__()
+        self._mm = model_manager
+
+    def run(self):
+        try:
+            if not self._mm.is_downloaded():
+                self._mm.download(progress_cb=self.progress.emit)
+            if not self._mm.is_engine_ready():
+                self._mm.download_engine(progress_cb=self.progress.emit)
+            self.finished.emit(True, "")
+        except Exception as e:  # noqa: BLE001 - UI 표시용 문자열 변환
+            self.finished.emit(False, str(e))
 
 class MainWindow(QMainWindow):
     def __init__(self, context):
@@ -74,9 +95,6 @@ class MainWindow(QMainWindow):
         title_box.addWidget(title); title_box.addWidget(subtitle)
         header.addLayout(title_box)
         header.addStretch()
-        settings_btn = QPushButton("설정")
-        settings_btn.clicked.connect(self.open_settings)
-        header.addWidget(settings_btn)
         outer.addLayout(header)
 
         # ---- 1. 목소리 선택 ----
@@ -299,10 +317,7 @@ class MainWindow(QMainWindow):
         dlg.exec()
         self._refresh_voices()
 
-    def open_settings(self):
-        SettingsDialog(self.context, self).exec()
-
-    # ---- 생성 ----
+        # ---- 생성 ----
     def start_generation(self):
         profile_uuid = self.voice_combo.currentData()
         if profile_uuid is None:
@@ -311,6 +326,9 @@ class MainWindow(QMainWindow):
         script = self.script_edit.toPlainText().strip()
         if not script:
             QMessageBox.information(self, "보이스 스튜디오", "대본을 입력해 주세요.")
+            return
+        if not self._model_ready():
+            self._ensure_model_async(lambda ok: self._continue_generation(profile_uuid, script) if ok else None)
             return
         try:
             if not self._start_worker(self._build_job(profile_uuid, script)):
@@ -343,9 +361,10 @@ class MainWindow(QMainWindow):
         return build_narrate_payload(
             job_id=job_id, profile_uuid=profile_uuid, segments=segments, gap_flags=gap_flags,
             profile_dir=str(self.context.profile_repository.root), output_path=output_path,
-            bitrate_kbps=int(self.context.settings.get("mp3_bitrate_kbps", 192)),
+            bitrate_kbps=int(config.MP3_BITRATE_KBPS),  # P18-7 고정
             model_path=self.context.model_manager.model_path(),
-            tts_backend=str(self.context.settings.get("tts_backend", "official")))
+            tts_backend="gguf",  # P18-1 단일 백엔드
+        )
 
     def _release_job_slot(self):
         """자신이 acquire한 GPU worker slot만 반납한다(P12.3 Final Hotfix)."""
@@ -554,12 +573,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "보이스 스튜디오", f"폴더를 열지 못했습니다: {e}")
 
     def save_mp3(self):
+        """P18-8: 대화상자 없이 목소리명_YYYYMMDD_HHMMSS.mp3로 자동 저장."""
         if not self._last_output:
             return
-        out_dir = self.context.settings.get("mp3_output_dir", "")
-        suggested = out_dir + "/나레이션.mp3" if out_dir else "나레이션.mp3"
-        path, _ = QFileDialog.getSaveFileName(self, "MP3 저장", suggested, "MP3 (*.mp3)")
-        if not path:
+        path = self._auto_save_path()
+        if path is None:
+            QMessageBox.warning(self, "보이스 스튜디오", "저장 폴더를 만들 수 없습니다.")
             return
         try:
             shutil.copyfile(self._last_output, path)
@@ -572,8 +591,119 @@ class MainWindow(QMainWindow):
         # P17-B: 저장 후에도 내장 플레이어가 새 파일을 가리키도록 갱신.
         if self._player_ready():
             from PySide6.QtCore import QUrl
-            self._player.setSource(QUrl.fromLocalFile(path))
+            self._player.setSource(QUrl.fromLocalFile(str(path)))
         QMessageBox.information(self, "보이스 스튜디오", f"MP3를 저장했습니다:\n{path}")
+
+
+    def _auto_save_path(self):
+        """P18-8: 목소리명_YYYYMMDD_HHMMSS.mp3. 한글 유지, 금지문자 치환, 중복 시 _2/_3."""
+        import re as _re
+        from datetime import datetime as _dt
+        name = self.voice_combo.currentText() or "나레이션"
+        safe = _re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip().rstrip(".") or "나레이션"
+        out_dir = Path(self.context.settings.get("mp3_output_dir", "") or default_mp3_dir())
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+        cand = out_dir / f"{safe}_{stamp}.mp3"
+        n = 2
+        while cand.exists():
+            cand = out_dir / f"{safe}_{stamp}_{n}.mp3"
+            n += 1
+            if n > 99:
+                break
+        return cand
+
+    def _model_ready(self) -> bool:
+        """P18-5: 모델+엔진 준비 여부."""
+        mm = self.context.model_manager
+        ready = getattr(mm, "is_downloaded", None)
+        if ready is not None and not ready():
+            return False
+        eng_ok = getattr(mm, "is_engine_ready", None)
+        if eng_ok is not None and not eng_ok():
+            return False
+        return True
+
+    def _ensure_model_async(self, done):
+        """P18-5: 모델/엔진 미준비 시 자동 다운로드(무결성 검증 포함). 실패 시 다시 시도 버튼."""
+        self.generate_btn.setEnabled(False)
+        self.status_label.setText("음성 모델을 준비하는 중...")
+        mm = self.context.model_manager
+        self._dl_thread = QThread(self)
+        self._dl_worker = _ModelPrepareWorker(mm)
+        self._dl_worker.moveToThread(self._dl_thread)
+        self._dl_thread.started.connect(self._dl_worker.run)
+        self._dl_worker.progress.connect(self._on_model_progress)
+        self._dl_worker.finished.connect(self._on_model_finished)
+        self._dl_done = done
+        self._dl_thread.start()
+
+    def _on_model_progress(self, payload: dict):
+        stage = payload.get("stage", "")
+        done, total = payload.get("done", 0), payload.get("total", 0)
+        label = {"download": "음성 모델", "engine": "음성 엔진"}.get(stage, stage)
+        if total > 0:
+            pct = int(done * 100 / total)
+            mb = done / 1e6
+            tmb = total / 1e6
+            self.status_label.setText(f"{label} 받는 중... {pct}% ({mb:.0f}/{tmb:.0f}MB)")
+            if stage == "download":
+                self.progress.setValue(min(pct, 100))
+        else:
+            self.status_label.setText(f"{label} 받는 중...")
+
+    def _on_model_finished(self, ok: bool, err: str):
+        self._dl_thread.quit()
+        self._dl_thread.wait(2000)
+        self._dl_thread = None
+        self._dl_worker = None
+        self.progress.setValue(0)
+        self.generate_btn.setEnabled(True)
+        if ok:
+            self._clear_model_retry()
+            self.status_label.setText("")
+            cb = self._dl_done
+            self._dl_done = None
+            if cb:
+                cb(True)
+        else:
+            self.status_label.setText(f"모델 준비 실패: {err}")
+            self._show_model_retry()
+
+    def _show_model_retry(self):
+        """P18-5: 실패 시 다시 시도 버튼(상태 라벨 옆)."""
+        if getattr(self, "_retry_btn", None) is not None:
+            return
+        btn = QPushButton("다시 시도")
+        btn.clicked.connect(self._retry_model_prepare)
+        header = self.status_label.parentWidget().layout()
+        header.insertWidget(header.indexOf(self.status_label) + 1, btn)
+        self._retry_btn = btn
+
+    def _clear_model_retry(self):
+        btn = getattr(self, "_retry_btn", None)
+        if btn is not None:
+            btn.setParent(None)
+            btn.deleteLater()
+            self._retry_btn = None
+
+    def _retry_model_prepare(self):
+        self._clear_model_retry()
+        self._ensure_model_async(self._dl_done)
+
+    def _continue_generation(self, profile_uuid: str, script: str):
+        if not self.isVisible():
+            return
+        try:
+            if not self._start_worker(self._build_job(profile_uuid, script)):
+                return
+        except VoiceStudioError as e:
+            QMessageBox.warning(self, "보이스 스튜디오", str(e))
+        except OSError as e:
+            QMessageBox.warning(self, "보이스 스튜디오", f"작업 파일을 준비할 수 없습니다: {e}")
 
     def closeEvent(self, event):
         """정상 종료 시 미저장 생성 결과 캐시를 정리한다(P12.3 Final Hotfix).

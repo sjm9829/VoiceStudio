@@ -11,6 +11,8 @@ import hashlib
 import logging
 import shutil
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Callable
 from ..core import gguf as gguf_cfg
@@ -109,15 +111,44 @@ class GgufModelManager:
             shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True)
         try:
-            for name in (gguf_cfg.GGUF_MAIN_FILE, gguf_cfg.GGUF_MMPROJ_FILE):
-                if progress_cb is not None:
-                    progress_cb({"stage": "download", "file": name})
+            sizes = self._remote_file_sizes()
+            poll_stop = threading.Event()
+            poller = None
+
+            def _poll():
+                base_done = 0
+                while not poll_stop.is_set():
+                    done = base_done
+                    for name in (gguf_cfg.GGUF_MAIN_FILE, gguf_cfg.GGUF_MMPROJ_FILE):
+                        p = tmp / name
+                        if p.exists():
+                            done += p.stat().st_size
+                    if progress_cb is not None and total_bytes > 0:
+                        progress_cb({"stage": "download", "done": min(done, total_bytes),
+                                     "total": total_bytes})
+                    poll_stop.wait(0.5)
+
+            def _dl(name: str, done_before: int) -> None:
+                # 완료된 앞 파일 크기를 합산해 누적 진행 유지(P18-6: model+mmproj 합산).
                 hf_hub_download(
                     repo_id=gguf_cfg.GGUF_MODEL_REPO,
                     filename=name,
                     revision=gguf_cfg.GGUF_MODEL_REVISION,
                     local_dir=tmp,
                 )
+
+            total_bytes = sum(sizes.get(n, 0) for n in (gguf_cfg.GGUF_MAIN_FILE, gguf_cfg.GGUF_MMPROJ_FILE))
+            if progress_cb is not None and total_bytes > 0:
+                poller = threading.Thread(target=_poll, daemon=True)
+                poller.start()
+            for name, done_before in (
+                (gguf_cfg.GGUF_MAIN_FILE, 0),
+                (gguf_cfg.GGUF_MMPROJ_FILE, sizes.get(gguf_cfg.GGUF_MAIN_FILE, 0)),
+            ):
+                _dl(name, done_before)
+            poll_stop.set()
+            if poller is not None:
+                poller.join(timeout=2)
             broken = _verify_pair(tmp)
             if broken:
                 raise OfflineError(
@@ -177,7 +208,8 @@ class GgufModelManager:
                 if progress_cb is not None:
                     progress_cb({"stage": "engine", "file": name})
                 dest = tmp / name
-                self._download_file(f"{base}/{name}", dest)
+                self._download_file(f"{base}/{name}", dest,
+                                    progress=progress_cb, label=name)
                 with zipfile.ZipFile(dest) as zf:
                     zf.extractall(tmp / "unpacked")
                 dest.unlink()
@@ -215,12 +247,37 @@ class GgufModelManager:
                 "음성 엔진을 받지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.") from exc
 
     @staticmethod
-    def _download_file(url: str, dest: Path) -> None:
+    def _download_file(url: str, dest: Path, progress=None, label: str = "") -> None:
+        """P18-6: 실시간 바이트 진행. content-length 기반 done/total 콜백."""
         import urllib.request
         tmp = dest.with_suffix(dest.suffix + ".part")
-        with urllib.request.urlopen(url, timeout=60) as resp, open(tmp, "wb") as fh:
-            shutil.copyfileobj(resp, fh, length=1 << 20)
+        done0 = 0
+        req = urllib.request.Request(url, method="HEAD") if False else None
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=60) as resp, open(tmp, "wb") as fh:
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
+            last = 0.0
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                done += len(chunk)
+                now = time.monotonic()
+                if progress and (now - last > 0.2 or done >= total):
+                    last = now
+                    progress({"stage": "engine", "file": label, "done": done, "total": total})
         tmp.rename(dest)
+
+    def _remote_file_sizes(self) -> dict[str, int]:
+        """P18-6: 고정 revision 파일들의 실제 크기(바이트). 실패 시 {}."""
+        try:
+            from huggingface_hub import HfApi
+            info = HfApi().model_info(gguf_cfg.GGUF_MODEL_REPO, revision=gguf_cfg.GGUF_MODEL_REVISION,
+                                      files_metadata=True)
+            return {s.rfilename: int(s.size or 0) for s in info.siblings or []}
+        except Exception:
+            return {}
 
     @staticmethod
     def _disable_hub_console_progress() -> None:

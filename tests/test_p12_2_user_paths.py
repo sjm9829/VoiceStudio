@@ -99,6 +99,7 @@ def test_d_ffmpeg_missing_gives_user_error(qapp, make_context, tmp_path, monkeyp
     # PATH에 ffmpeg가 설치된 개발 머신에서도 동일하게 검증되도록 탐색을 차단한다.
     monkeypatch.setattr(fa.shutil, "which", lambda name: None)
     monkeypatch.setattr(fa, "bundled_bin_dirs", lambda: [])
+    monkeypatch.setattr(fa, "_project_third_party_bin", lambda: None)
     with pytest.raises(VoiceStudioError):
         RealFfmpegAdapter(ffmpeg=None, ffprobe=None)
 
