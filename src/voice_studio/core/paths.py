@@ -46,11 +46,25 @@ def engines_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "engine"
 
 def gguf_engine_dir() -> Path:
-    """GGUF 실행 엔진(llama-tts) 설치 경로. dev: VOICE_STUDIO_ENGINE_DIR override 우선(P17-C)."""
+    """GGUF 실행 엔진(llama-tts) 경로.
+
+    dev: VOICE_STUDIO_ENGINE_DIR override 우선(P17-C).
+    frozen(P18-F8): 재다운로드는 쓰기 가능한 사용자 데이터 경로에만 수행한다.
+    Program Files의 번들 엔진은 읽기 전용으로 사용하고, 사용자 엔진이 준비되면 우선한다.
+    """
     override = os.environ.get("VOICE_STUDIO_ENGINE_DIR")
     if override:
         return Path(override)
-    return engines_dir() / "llama-cuda"
+    bundled = engines_dir() / "llama-cuda"
+    if not getattr(sys, "frozen", False):
+        return bundled
+    user = app_data_dir() / "engines" / "llama-cuda"
+    exe = "llama-tts.exe" if sys.platform == "win32" else "llama-tts"
+    if (user / exe).is_file():
+        return user
+    if (bundled / exe).is_file():
+        return bundled
+    return user  # 둘 다 없으면 쓰기 가능한 경로에 다운로드한다.
 
 def profiles_dir() -> Path:
     return app_data_dir() / "profiles"

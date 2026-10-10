@@ -614,3 +614,27 @@ def test_generate_diagnostics_capture_original(tmp_path, monkeypatch):
         assert _w3.getframerate() == sr and _w3.getnframes() == len(raw)
         raw_copy = np.frombuffer(_w3.readframes(_w3.getnframes()), dtype="<i2")
     np.testing.assert_array_equal(raw_copy, raw)
+
+
+def test_frozen_engine_redownload_targets_user_dir(monkeypatch, tmp_path):
+    """P18-F8: frozen에서 번들 엔진이 없으면 쓰기 가능한 사용자 경로를 반환한다."""
+    import sys as _sys
+    import voice_studio.core.paths as paths
+    monkeypatch.setattr(_sys, "frozen", True, raising=False)
+    monkeypatch.setattr(_sys, "_MEIPASS", str(tmp_path / "mei"), raising=False)
+    monkeypatch.delenv("VOICE_STUDIO_ENGINE_DIR", raising=False)
+    monkeypatch.setenv("VOICE_STUDIO_DATA_DIR", str(tmp_path / "data"))
+    # 사용자 엔진이 이미 있으면 우선
+    user_exe = paths.app_data_dir() / "engines" / "llama-cuda"
+    user_exe.mkdir(parents=True, exist_ok=True)
+    (user_exe / "llama-tts").write_bytes(b"x")
+    assert paths.gguf_engine_dir() == user_exe
+    # 번들만 있으면 번들
+    (user_exe / "llama-tts").unlink()
+    bundled = tmp_path / "mei" / "engine" / "llama-cuda"
+    bundled.mkdir(parents=True, exist_ok=True)
+    (bundled / "llama-tts").write_bytes(b"x")
+    assert paths.gguf_engine_dir() == bundled
+    # 둘 다 없으면 쓰기 가능한 사용자 경로
+    import shutil as _sh; _sh.rmtree(bundled)
+    assert paths.gguf_engine_dir() == user_exe
