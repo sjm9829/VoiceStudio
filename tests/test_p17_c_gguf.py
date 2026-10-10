@@ -13,6 +13,8 @@ import numpy as np
 import pytest
 
 from voice_studio.core import gguf as gguf_cfg
+from voice_studio.core.errors import WorkerError
+from voice_studio.infra.gguf_adapter import write_pcm16_wav
 from voice_studio.workers.job_schema import (BACKEND_GGUF, BACKEND_OFFICIAL, JobSchemaError,
                                              build_narrate_payload, build_register_payload, parse_job)
 
@@ -87,7 +89,9 @@ def test_generate_resamples_and_cleans_tmp_wav(tmp_path):
     spec = ada.prepare_speaker(spec, speaker)
     pcm = ada.generate(spec, "안녕", 24000, workdir=tmp_path)
     assert pcm.dtype == np.float32 and pcm.size > 0
-    assert not out_wav.exists() or True  # 성공 시 정리, 실패해도 계약 아님
+    # 성공 시 job 임시 out_wav는 정리될 수 있으나, 남아 있으면 실제 생성 결과여야 한다
+    if out_wav.exists():
+        assert out_wav.stat().st_size > 0
 
 
 def test_generate_requires_speaker_and_engine(tmp_path):
@@ -506,6 +510,41 @@ def test_gguf_command_korean_path_and_multi_segment_same_speaker(tmp_path):
     cmd2 = adapter.build_command(text="두 번째 문장.", out_wav=tmp_path / "out2.wav", speaker=str(kor))
     assert str(kor) == cmd[cmd.index("--tts-speaker-file") + 1]
     assert str(kor) in cmd2  # 동일 참조 유지
-    assert str(kor).replace("\\", "/") or True
     # 임시 파일: build_command는 파일을 만들지 않는다(순수 조립)
     assert not (tmp_path / "out1.wav").exists()
+
+
+def test_generate_empty_result_raises(tmp_path):
+    """llama-tts가 0-sample wav를 내면 WorkerError(P17-H7 빈 결과 처리)."""
+    import wave as _w
+    calls = {}
+
+    def fake_run(cmd):
+        calls["cmd"] = cmd
+        out = cmd[cmd.index("--output") + 1]
+        with _w.open(str(out), "wb") as w:  # 0-sample wav
+            w.setnchannels(1); w.sampwidth = 2 if False else None
+            w.setsampwidth(2); w.setframerate(24000)
+            w.writeframes(b"")
+        class R:
+            returncode = 0
+        return R()
+
+    ada = _adapter(tmp_path, runner=fake_run)
+    spec = ada.create_prompt(np.zeros(4, dtype=np.float32), 24000, "대사")
+    speaker = tmp_path / "spk.wav"
+    write_pcm16_wav(speaker, np.zeros(100, dtype=np.float32), 24000)
+    spec = ada.prepare_speaker(spec, speaker)
+    with pytest.raises(WorkerError):
+        ada.generate(spec, "안녕", 24000, workdir=tmp_path)
+
+
+def test_generate_missing_output_raises(tmp_path):
+    """llama-tts 실패로 out wav가 없으면 WorkerError."""
+    ada = _adapter(tmp_path, runner=lambda cmd: None)
+    spec = ada.create_prompt(np.zeros(4, dtype=np.float32), 24000, "대사")
+    speaker = tmp_path / "spk.wav"
+    write_pcm16_wav(speaker, np.zeros(100, dtype=np.float32), 24000)
+    spec = ada.prepare_speaker(spec, speaker)
+    with pytest.raises(WorkerError):
+        ada.generate(spec, "안녕", 24000, workdir=tmp_path)

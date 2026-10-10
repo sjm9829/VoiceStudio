@@ -170,6 +170,8 @@ class GgufQwenAdapter:
         if not out_wav.is_file() or out_wav.stat().st_size == 0:
             raise WorkerError("음성 생성 결과가 비어 있습니다.")
         pcm, src_sr = _wav_to_pcm16(out_wav)
+        if pcm.size == 0:
+            raise WorkerError("음성 생성 결과가 비어 있습니다.")
         try:
             out_wav.unlink()
         except OSError:
