@@ -44,10 +44,10 @@ def test_frozen_ffmpeg_search_covers_internal_bin(monkeypatch):
 
 def test_spec_bundles_ffmpeg_and_notice():
     spec = (Path(__file__).resolve().parents[1] / "packaging" / "VoiceStudio.spec").read_text(encoding="utf-8")
-    assert 'collect_data_files("qwen_tts"' in spec           # P12.2-07
+    assert 'collect_data_files("huggingface_hub")' in spec     # P18-F6: gguf 단일화
     # P12.2-08/P12.3-01: collect_all 계약은 spec_helpers.apply_collect로 검증한다.
     assert 'spec_helpers.merge_collect' in spec
-    for pkg in ('ctranslate2', 'tokenizers', 'safetensors'):
+    for pkg in ('ctranslate2', 'tokenizers'):
         assert f'"{pkg}"' in spec
     assert '"ffmpeg.exe"' in spec and '"ffprobe.exe"' in spec  # P12.2-05
     assert "FFMPEG_NOTICE.txt" in spec                        # P12.2-06
@@ -56,12 +56,9 @@ def test_spec_bundles_ffmpeg_and_notice():
 def test_build_script_cuda_tag_parameterized():
     """P12.2-12: CUDA_TAG 환경변수로 조합 교체 가능 + 실패 시 빌드 중단."""
     bat = (Path(__file__).resolve().parents[1] / "scripts" / "build_windows.bat").read_text(encoding="utf-8")
-    assert "CUDA_TAG" in bat
-    # GPU/빌드 역할 분리: 빌드는 check_cuda.py를 필수 호출하지 않고 GPU 없어도 성공한다.
-    assert "python scripts\\check_cuda.py" not in bat
+    # P18-F6: 0.6B torch/qwen-tts 빌드 의존성 제거, gguf 단일 경로.
+    assert "pip install torch" not in bat and "pip install qwen-tts" not in bat
     assert "check_runtime_packages.py || goto :err" in bat
-    assert "=== BEFORE QWEN-TTS ===" in bat and "=== AFTER QWEN-TTS ===" in bat
-    assert "pip check" in bat
 
 
 def test_check_cuda_validates_cuda_and_qwen_tts():

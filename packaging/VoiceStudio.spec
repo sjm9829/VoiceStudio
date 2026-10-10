@@ -35,15 +35,9 @@ datas = [
 ]
 binaries = []
 hiddenimports = [
-    # TTS / 모델 런타임(worker 지연 import)
-    "qwen_tts",
-    "torch",
-    "transformers",
+    # STT/모델 런타임(worker 지연 import) — P18-F6: GGUF 단일화, qwen_tts/torch/transformers 제외
     "tokenizers",
-    "safetensors",
-    "safetensors.numpy",
     "huggingface_hub",
-    # STT
     "faster_whisper",
     "ctranslate2",
     # 오디오/UI
@@ -52,18 +46,12 @@ hiddenimports = [
 ]
 
 # 지연 import되는 대형 패키지의 서브모듈/데이터를 통째로 수집한다.
-hiddenimports += collect_submodules("qwen_tts")
 hiddenimports += collect_submodules("faster_whisper")
-hiddenimports += collect_submodules("transformers")
-
-# qwen_tts: 모델 설정/토크나이저 데이터 파일 누락 시 frozen에서 from_pretrained가 실패한다(P12.2-07).
-datas += collect_data_files("qwen_tts", include_py_files=True)
-datas += collect_data_files("transformers")
 datas += collect_data_files("huggingface_hub")
 
 # 의존성의 data/DLL 보강(P12.2-08/P12.3-01): ctranslate2/tokenizers/safetensors의
 # 동적 라이브러리와 데이터 파일을 올바른 매핑으로 수집한다.
-for _pkg in ("ctranslate2", "tokenizers", "safetensors"):
+for _pkg in ("ctranslate2", "tokenizers"):
     spec_helpers.merge_collect(_pkg, datas, binaries, hiddenimports)
 
 # FFmpeg 번들(P12.2-05/06): third_party/bin의 ffmpeg.exe/ffprobe.exe를 설치 폴더의

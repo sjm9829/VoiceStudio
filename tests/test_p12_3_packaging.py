@@ -94,12 +94,12 @@ def test_check_dist_script_matches_frozen_search_path():
     assert '"_internal" / "bin"' in inspect.getsource(fa.bundled_bin_dirs)
 
 
-def test_build_script_torch_torchaudio_same_cuda_index():
-    """P12.3-11/12: torch+torchaudio 동일 index 설치, 설치 전후 버전 기록."""
+def test_build_script_gguf_single_backend_no_torch():
+    """P18-F6: gguf 단일 백엔드 — 빌드에서 torch/qwen-tts 설치 단계 제거."""
     bat = (ROOT / "scripts" / "build_windows.bat").read_text(encoding="utf-8")
-    assert "pip install torch torchaudio --index-url" in bat
-    assert "=== BEFORE QWEN-TTS ===" in bat and "=== AFTER QWEN-TTS ===" in bat
-    assert "assert torch.version.cuda is not None" in bat
+    assert "qwen-tts" not in bat
+    assert "torchaudio" not in bat
+    assert "CUDA_TAG" not in bat
 
 
 def test_spec_adds_spec_dir_to_sys_path_before_helper_import():

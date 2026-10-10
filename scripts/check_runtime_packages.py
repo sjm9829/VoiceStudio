@@ -15,41 +15,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from version_compat import check_torch_torchaudio_compat  # noqa: E402
 
 
 def main() -> int:
+    """P18-F6: GGUF 단일 백엔드 프로덕션 런타임 계약 검사(torch/qwen_tts 제거)."""
     ok = True
-    try:
-        import torch  # type: ignore
-    except ImportError as e:
-        print(f"[FAIL] torch import: {e}")
-        return 1
-    print("torch:", torch.__version__)
-    try:
-        import torchaudio  # type: ignore
-        print("torchaudio:", torchaudio.__version__)
-    except ImportError as e:
-        print(f"[FAIL] torchaudio import: {e}")
-        return 1
-    compat_ok, compat_msg = check_torch_torchaudio_compat(torch, torchaudio)
-    print("[OK] torch/torchaudio:", compat_msg if compat_ok else "")
-    if not compat_ok:
-        print(f"[FAIL] {compat_msg}")
-        ok = False
-    if torch.version.cuda is None:
-        print("[FAIL] CUDA wheel이 아닙니다(torch.version.cuda is None).")
-        ok = False
-    else:
-        print("torch.version.cuda:", torch.version.cuda, "(CUDA wheel 확인)")
-        # GPU 존재 여부는 검사하지 않는다(빌드 머신에 GPU 없어도 성공).
-    try:
-        import qwen_tts  # noqa: F401
-        from qwen_tts import Qwen3TTSModel  # noqa: F401
-        print("[OK] qwen_tts/Qwen3TTSModel import 성공")
-    except Exception as e:
-        print(f"[FAIL] qwen_tts import: {e}")
-        ok = False
+    for mod in (
+        "numpy",
+        "safetensors",
+        "huggingface_hub",
+        "faster_whisper",
+        "ctranslate2",
+        "PySide6.QtCore",
+    ):
+        try:
+            import importlib
+            importlib.import_module(mod)
+            print(f"[OK] {mod}")
+        except Exception as e:
+            print(f"[FAIL] {mod} import: {e}")
+            ok = False
     if not ok:
         print("CHECK_RUNTIME_PACKAGES_FAILED")
         return 1

@@ -41,11 +41,12 @@ def test_spec_pre_analysis_collect_calls_present():
     analysis_pos = spec.index("a = Analysis(")
     pre = spec[:analysis_pos]
     post = spec[analysis_pos:]
-    for pkg in ("qwen_tts", "faster_whisper", "transformers"):
+    # P18-F6: gguf 단일화 — qwen_tts/transformers 수집 제거
+    for pkg in ("faster_whisper",):
         assert f'collect_submodules("{pkg}")' in pre, pkg
-    for pkg in ("qwen_tts", "transformers", "huggingface_hub"):
+    for pkg in ("huggingface_hub",):
         assert f'collect_data_files("{pkg}"' in pre, pkg
-    assert 'for _pkg in ("ctranslate2", "tokenizers", "safetensors"):' in pre
+    assert 'for _pkg in ("ctranslate2", "tokenizers"):' in pre
     assert "spec_helpers.merge_collect" in pre
     assert "binaries=binaries" in post and "datas=datas" in post
     assert "hiddenimports=hiddenimports" in post

@@ -82,45 +82,20 @@ def test_cuda_wheel_none_is_reported_by_runtime_package_check():
     assert ok
 
 
-def _run_runtime_package_check(monkeypatch, torch, torchaudio, qwen_ok=True):
+def _run_runtime_package_check(monkeypatch):
     check = _load(
         "check_runtime_packages_under_test", SCRIPTS / "check_runtime_packages.py"
     )
-    fake_qwen = types.ModuleType("qwen_tts")
-    if qwen_ok:
-        fake_qwen.Qwen3TTSModel = type("Qwen3TTSModel", (), {})
-    monkeypatch.setitem(sys.modules, "torch", torch)
-    monkeypatch.setitem(sys.modules, "torchaudio", torchaudio)
-    monkeypatch.setitem(sys.modules, "qwen_tts", fake_qwen)
     return check.main()
 
 
-def test_check_runtime_packages_accepts_real_build_combo(monkeypatch, capsys):
-    code = _run_runtime_package_check(
-        monkeypatch, _FakeTorch("2.14.1+cu126"), _FakeTorchAudio("2.11.0+cu126")
-    )
+def test_check_runtime_packages_ok_on_clean_env(capsys):
+    # P18-F6: gguf 단일화 런타임 계약 — 실제 venv에서 base 의존성 import 성공.
+    code = _run_runtime_package_check(None)
     out = capsys.readouterr().out
     assert code == 0
     assert "CHECK_RUNTIME_PACKAGES_OK" in out
-    assert "Stable ABI" in out
-
-
-def test_check_runtime_packages_fails_without_cuda_wheel(monkeypatch, capsys):
-    code = _run_runtime_package_check(
-        monkeypatch, _FakeTorch("2.14.1", cuda=None), _FakeTorchAudio("2.11.0")
-    )
-    out = capsys.readouterr().out
-    assert code == 1
-    assert "CHECK_RUNTIME_PACKAGES_FAILED" in out
-
-
-def test_check_runtime_packages_fails_on_qwen_import_error(monkeypatch, capsys):
-    code = _run_runtime_package_check(
-        monkeypatch, _FakeTorch("2.14.1"), _FakeTorchAudio("2.11.0"), qwen_ok=False
-    )
-    out = capsys.readouterr().out
-    assert code == 1
-    assert "qwen_tts import" in out
+    assert "qwen_tts" not in out and "torch:" not in out
 
 
 def test_check_cuda_uses_stable_abi_rule():
@@ -128,8 +103,7 @@ def test_check_cuda_uses_stable_abi_rule():
     source = (SCRIPTS / "check_cuda.py").read_text(encoding="utf-8")
     assert "check_torch_torchaudio_compat" in source
     assert 'split("+")' not in source
-    source_runtime = (SCRIPTS / "check_runtime_packages.py").read_text(encoding="utf-8")
-    assert "check_torch_torchaudio_compat" in source_runtime
+
 
 
 def test_build_windows_bat_has_no_cuda_mandatory_step():
