@@ -64,3 +64,37 @@ def test_safe_job_cache_dir_isolated_from_real_user_data(tmp_path, monkeypatch):
     assert d.is_dir() and str(d).startswith(str(tmp_path / "iso"))
     real = tmp_path / "real-la" / "VoiceStudio"
     assert not real.exists()
+
+
+# ---- P17-H1: frozen(PyInstaller) 엔진 경로 규약 ----
+
+def test_engines_dir_frozen_uses_meipass(monkeypatch, tmp_path):
+    """frozen에서 sys._MEIPASS(engine 리소스 루트)를 우선한다(PyInstaller 공식 규약)."""
+    import voice_studio.core.paths as vp
+    meipass = tmp_path / "app" / "_internal"
+    (meipass / "engine").mkdir(parents=True)
+    monkeypatch.setattr(vp.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(vp.sys, "_MEIPASS", str(meipass), raising=False)
+    monkeypatch.setattr(vp.sys, "executable", str(tmp_path / "app" / "VoiceStudio.exe"))
+    assert vp.engines_dir() == meipass / "engine"
+    assert vp.gguf_engine_dir() == meipass / "engine" / "llama-cuda"
+
+
+def test_engines_dir_frozen_fallback_internal_dir(monkeypatch, tmp_path):
+    """_MEIPASS가 없는 구형/변형 빌드에선 exe 인접 _internal/engine을 탐색한다."""
+    import voice_studio.core.paths as vp
+    exe_dir = tmp_path / "app"
+    internal = exe_dir / "_internal"
+    (internal / "engine").mkdir(parents=True)
+    monkeypatch.setattr(vp.sys, "frozen", True, raising=False)
+    monkeypatch.delattr(vp.sys, "_MEIPASS") if hasattr(vp.sys, "_MEIPASS") else None
+    monkeypatch.setattr(vp.sys, "executable", str(exe_dir / "VoiceStudio.exe"))
+    assert vp.engines_dir() == internal / "engine"
+
+
+def test_engines_dir_dev_uses_repo_src():
+    """개발 환경 규약 유지: src/voice_studio/core/paths.py 기준 repo/src/engine(기존 동작 보존)."""
+    from voice_studio.core import paths as vp_mod
+    repo_src = Path(__file__).resolve().parents[1] / "src"
+    d = vp_mod.engines_dir()
+    assert d == repo_src / "engine"

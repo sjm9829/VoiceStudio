@@ -19,4 +19,7 @@ LLAMA_WIN_CUDA_ASSET = "llama-b11540-bin-win-cuda-12.4-x64.zip"
 LLAMA_CUDART_ASSET = "cudart-llama-bin-win-cuda-12.4-x64.zip"
 LLAMA_TTS_BINARY = "llama-tts"  # Windows 실행확장자 .exe는 런타임에 결정
 
+LLAMA_WIN_CUDA_SHA256 = "5103995b75db5538f17a51823e997561a2036b05ef7545c8aa424e916ff22485"
+LLAMA_CUDART_SHA256 = "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"
+
 SUPPORTED_TTS_LANGS = ("ko", "en", "zh", "ja", "de", "it", "pt", "es", "fr", "ru")

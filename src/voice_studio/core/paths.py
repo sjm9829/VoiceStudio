@@ -28,9 +28,22 @@ def gguf_models_dir() -> Path:
     return app_data_dir() / "models" / "gguf"
 
 def engines_dir() -> Path:
-    """번들된 외부 엔진(llama.cpp 등) 배치 경로. frozen 설치본의 app dir 하위 engine/."""
-    base = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2]
-    return base / "engine"
+    """번들된 외부 엔진(llama.cpp 등) 배치 경로.
+
+    frozen(PyInstaller onedir/onefile)에서는 공식 리소스 규약 sys._MEIPASS
+    (onedir 6.x: <app>/_internal) 하위 engine/을 본다. exe 인접 engine/은
+    구형 배치 하위 호환 후보로만 확인한다. 개발 환경은 repo root/engine.
+    """
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass) / "engine"
+        exe_dir = Path(sys.executable).parent
+        internal = exe_dir / "_internal" / "engine"
+        if internal.is_dir():
+            return internal
+        return exe_dir / "engine"
+    return Path(__file__).resolve().parents[2] / "engine"
 
 def gguf_engine_dir() -> Path:
     """GGUF 실행 엔진(llama-tts) 설치 경로. dev: VOICE_STUDIO_ENGINE_DIR override 우선(P17-C)."""
