@@ -63,23 +63,20 @@ def _wav_to_pcm16(path: str | Path) -> tuple[np.ndarray, int]:
     return data.astype(np.float32), int(sr)
 
 
-def _trim_edge_silence(pcm: np.ndarray, sample_rate: int, *,
-                       keep_s: float = 0.12, rel: float = 0.05, floor: float = 0.004) -> np.ndarray:
-    """P18-3: 생성 결과 앞뒤 무음을 정리한다(원인: 모델이 리드/테일 무음을 임의로 포함).
+def _diag_dir() -> Path | None:
+    """P18-F1: VOICE_STUDIO_DIAGNOSTICS_DIR이 있으면 어댑터 단계 진단 저장소를 돌려준다."""
+    import os
+    d = os.environ.get("VOICE_STUDIO_DIAGNOSTICS_DIR")
+    return Path(d) if d else None
 
-    무음을 '추가'하는 것이 아니라 제거하는 동작이다. 임계값은 피크 기준 상대값.
-    """
-    if pcm.size == 0:
-        return pcm
-    peak = float(np.abs(pcm).max())
-    th = max(floor, peak * rel)
-    idx = np.where(np.abs(pcm) > th)[0]
-    if idx.size == 0:
-        return pcm
-    keep = int(keep_s * sample_rate)
-    a = max(0, int(idx[0]) - keep)
-    b = min(pcm.size, int(idx[-1]) + 1 + keep)
-    return pcm[a:b]
+
+def _save_diag_wav_f32(path: Path, pcm: np.ndarray, sample_rate: int) -> None:
+    """float32 wav로 원본 샘플을 무손실 보존한다(진단 전용, 실패가 본 결과를 막지 않는다)."""
+    try:
+        from ..services.audio_diagnostics import _write_wav_f32
+        _write_wav_f32(path, np.ascontiguousarray(pcm, dtype=np.float32), int(sample_rate))
+    except Exception:
+        pass
 
 
 def _resample(wav: np.ndarray, src: int, dst: int) -> np.ndarray:
@@ -192,15 +189,20 @@ class GgufQwenAdapter:
                 f"GGUF 음성 생성이 실패했습니다(exit={rc}). {tail}".strip())
         if not out_wav.is_file() or out_wav.stat().st_size == 0:
             raise WorkerError("음성 생성 결과가 비어 있습니다.")
-        pcm, src_sr = _wav_to_pcm16(out_wav)
-        if pcm.size == 0:
+        raw_pcm, src_sr = _wav_to_pcm16(out_wav)
+        if raw_pcm.size == 0:
             raise WorkerError("음성 생성 결과가 비어 있습니다.")
-        pcm = _trim_edge_silence(pcm, src_sr)
+        # P18-F1: 자동 트리밍 제거. llama-tts 원본 샘플을 그대로 사용한다(발화 누락 은폐 금지).
+        diag = _diag_dir()
+        if diag is not None:
+            diag.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(out_wav, diag / "00_llama_original.wav")
+            _save_diag_wav_f32(diag / "01_qwen_raw_24k.wav", raw_pcm, src_sr)
         try:
             out_wav.unlink()
         except OSError:
             pass
-        return _resample(pcm, src_sr, sample_rate)
+        return _resample(raw_pcm, src_sr, sample_rate)
 
     # -- 내부 --
     def build_command(self, *, text: str, out_wav: Path, speaker: str,
