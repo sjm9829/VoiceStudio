@@ -60,7 +60,12 @@ def _adapter(tmp_path, runner):
 
 def test_build_command_uses_fixed_model_and_tuning(tmp_path):
     ada = _adapter(tmp_path, runner=lambda cmd: None)
-    cmd = ada.build_command(text="안녕", out_wav=tmp_path / "o.wav", speaker="/tmp/s.wav")
+    import wave as _wave
+    spk = tmp_path / "speaker.wav"
+    with _wave.open(str(spk), "wb") as _w:
+        _w.setnchannels(1); _w.setsampwidth(2); _w.setframerate(24000)
+        _w.writeframes(b"\x00\x00" * 2400)  # P18-2 검증 통과용 0.1초 무음
+    cmd = ada.build_command(text="안녕", out_wav=tmp_path / "o.wav", speaker=str(spk))
     assert cmd[0] == str(ada.engine_path)
     assert cmd[cmd.index("-m") + 1].endswith(gguf_cfg.GGUF_MAIN_FILE)
     assert cmd[cmd.index("--mmproj") + 1].endswith(gguf_cfg.GGUF_MMPROJ_FILE)
@@ -73,8 +78,9 @@ def test_generate_resamples_and_cleans_tmp_wav(tmp_path):
     out_wav = tmp_path / "gguf_out.wav"
 
     def fake_run(cmd):
-        # adapter 계약: engine이 out_wav(48kHz)를 남기고, adapter가 24kHz로 재표본화한다.
-        with wave.open(str(out_wav), "wb") as w:
+        # adapter 계약: engine이 out_wav(48kHz, --output 경로)를 남긴다.
+        out_path = cmd[cmd.index("--output") + 1]
+        with wave.open(out_path, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(48000)
             w.writeframes((np.ones(4800) * 8000).astype("<i2").tobytes())
         return None
@@ -160,12 +166,11 @@ def test_app_context_selects_gguf_manager(tmp_path, monkeypatch):
     monkeypatch.setenv("VOICE_STUDIO_DATA_DIR", str(tmp_path / "appdata"))
     from voice_studio.app_context import AppContext
     from voice_studio.services.gguf_model_manager import GgufModelManager
-    from voice_studio.services.model_manager import ModelManager
     ctx = AppContext.__new__(AppContext)
-    ctx.settings = {"tts_backend": "gguf"}
-    assert isinstance(AppContext._make_model_manager(ctx.settings), GgufModelManager)
-    assert isinstance(AppContext._make_model_manager({}), ModelManager)
-    assert isinstance(AppContext._make_model_manager({"tts_backend": "official"}), ModelManager)
+    # P18-1: 단일 gguf 백엔드. settings 값과 무관하게 항상 GgufModelManager.
+    assert isinstance(AppContext._make_model_manager({"tts_backend": "gguf"}), GgufModelManager)
+    assert isinstance(AppContext._make_model_manager({}), GgufModelManager)
+    assert isinstance(AppContext._make_model_manager({"tts_backend": "official"}), GgufModelManager)
 
 
 # ---- worker 분기 ----
@@ -279,15 +284,15 @@ def test_settings_dialog_backend_switch_and_persist(qtbot, tmp_path):
 
 def test_settings_dialog_default_manager_official(qtbot, tmp_path):
     from voice_studio.ui.settings_dialog import SettingsDialog
-    from voice_studio.services.model_manager import ModelManager
     ctx, repo = _make_ctx(tmp_path)
     dlg = SettingsDialog(ctx)
     qtbot.addWidget(dlg)
-    assert isinstance(ctx.model_manager, ModelManager)
+    # P18-1: 단일 gguf - 어떤 선택 후에도 manager는 GgufModelManager 유지.
+    from voice_studio.services.gguf_model_manager import GgufModelManager
     dlg.backend_combo.setCurrentIndex(dlg.backend_combo.findData("official"))
     dlg._save_and_close()
-    assert ctx.settings["tts_backend"] == "official"
-    assert isinstance(ctx.model_manager, ModelManager)
+    assert ctx.settings["tts_backend"] == "official"  # 저장값은 남지만 무시됨
+    assert isinstance(ctx.model_manager, GgufModelManager)
 
 
 # ---- P17-D: packaging 계약(GGUF 엔진 번들 경로) ----

@@ -178,14 +178,18 @@ class GgufQwenAdapter:
             raise WorkerError("참조 음성 파일이 없어 목소리 복제를 시작할 수 없습니다.")
         if not Path(self.engine_path).is_file():
             raise WorkerError("GGUF 음성 엔진(llama-tts)을 찾을 수 없습니다. 프로그램을 다시 설치해 주세요.")
-        out_wav = Path(workdir or Path(self.model_dir).parent) / "gguf_out.wav"
+        import uuid as _uuid
+        out_wav = Path(workdir or Path(self.model_dir).parent) / f"gguf_out_{_uuid.uuid4().hex[:8]}.wav"
         out_wav.parent.mkdir(parents=True, exist_ok=True)
-        if out_wav.exists():
-            out_wav.unlink()
         cmd = self.build_command(text=text, out_wav=out_wav, speaker=str(prompt.speaker_wav),
                                  language=language or prompt.language)
         self.last_command = cmd
         completed = self._runner(cmd)
+        rc = getattr(completed, "returncode", 0)
+        if rc:
+            tail = (getattr(completed, "stderr", "") or "")[-400:].strip()
+            raise WorkerError(
+                f"GGUF 음성 생성이 실패했습니다(exit={rc}). {tail}".strip())
         if not out_wav.is_file() or out_wav.stat().st_size == 0:
             raise WorkerError("음성 생성 결과가 비어 있습니다.")
         pcm, src_sr = _wav_to_pcm16(out_wav)
@@ -201,7 +205,11 @@ class GgufQwenAdapter:
     # -- 내부 --
     def build_command(self, *, text: str, out_wav: Path, speaker: str,
                       language: str = "ko") -> list[str]:
-        """llama-tts 인자 구성. 실제 바이너리 --help 기준 확인된 long 옵션만 사용한다."""
+        """llama-tts 인자 구성. 실제 바이너리 --help 기준 확인된 long 옵션만 사용한다.
+
+        P18-2: speaker 파일은 존재 + 읽기 가능한 WAV여야 한다. 없으면 명확한 오류.
+        """
+        self._validate_speaker(speaker)
         return [
             self.engine_path,
             "-m", str(Path(self.model_dir) / gguf_cfg.GGUF_MAIN_FILE),
@@ -216,6 +224,24 @@ class GgufQwenAdapter:
             "--top-k", str(self.top_k),
             "--top-p", str(self.top_p),
         ]
+
+    @staticmethod
+    def _validate_speaker(speaker: str) -> None:
+        """P18-2: --tts-speaker-file 사전 검증. 미존재/비WAV는 명확한 오류로 안내."""
+        from ..core.errors import UnsupportedAudioError
+        p = Path(speaker)
+        if not p.is_file():
+            raise UnsupportedAudioError(
+                f"참조 음성 파일을 찾을 수 없습니다: {p}",
+                user_message="참조 음성을 찾을 수 없습니다. 목소리를 다시 등록해 주세요.")
+        try:
+            with wave.open(str(p)) as w:
+                if w.getnframes() <= 0 or w.getcomptype() != "NONE":
+                    raise wave.Error("unsupported container")
+        except wave.Error as exc:
+            raise UnsupportedAudioError(
+                f"참조 음성 WAV를 읽을 수 없습니다: {exc}",
+                user_message="참조 음성이 WAV(PCM) 형식이 아니거나 손상됐습니다. 목소리를 다시 등록해 주세요.") from exc
 
     @staticmethod
     def _run(cmd: list[str]) -> subprocess.CompletedProcess:
