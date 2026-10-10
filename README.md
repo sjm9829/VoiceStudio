@@ -68,3 +68,11 @@ voice-studio/
 ## 라이선스
 - 애플리케이션 코드: MIT (`LICENSE`)
 - 모델: Apache-2.0 (`third_party/MODEL_NOTICE.md` 참조)
+
+
+### P17-H5 RTX 2070 SUPER 8GB 최적화 (2026-)
+
+- `-ngl 12`(기존 DEFAULT_NGPU 유지), `-c 4096`(신규 DEFAULT_N_CTX)로 KV 캐시 점유 상한을 둠.
+- 1.7B Q8_0 가중치 약 1.8GB + mmproj + KV 4096 토큰 기준 점유는 이론상 8GB 이내 여유.
+  **VRAM 실측, -ngl별 속도, OOM 반복 생성, 긴 대본 다중 구간 안정성, 음질: GPU 실기 필요 — NOT RUN.**
+- GPU 불가 시 CPU fallback 없음: 어댑터는 명시 오류(기존 정책 유지).

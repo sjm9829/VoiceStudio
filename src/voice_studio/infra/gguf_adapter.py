@@ -20,6 +20,8 @@ from ..core import gguf as gguf_cfg
 from ..core.errors import WorkerError
 
 DEFAULT_NGPU = 12          # RTX 2070 SUPER 8GB 기준 mmproj+backbone 여유치(측정 전 보수값)
+DEFAULT_N_CTX = 4096       # H5: KV 캐시 VRAM 점유 제한용. b11540 기본 대비 보수적.
+                           # 실측 전 추정값이며, 문장 단위 TTS 입력(수백 토큰)이라 품질 영향은 작음.
 DEFAULT_TEMP = 0.8
 DEFAULT_TOP_K = 50
 DEFAULT_TOP_P = 0.95
@@ -38,6 +40,7 @@ class GgufPromptSpec:
     ref_text: str = ""
     language: str = "ko"
     ngpu_layers: int = DEFAULT_NGPU
+    n_ctx: int = DEFAULT_N_CTX
     temp: float = DEFAULT_TEMP
     top_k: int = DEFAULT_TOP_K
     top_p: float = DEFAULT_TOP_P
@@ -94,12 +97,14 @@ class GgufQwenAdapter:
 
     def __init__(self, model_dir: str | Path, engine_path: str | Path, *,
                  language: str = "ko", ngpu_layers: int = DEFAULT_NGPU,
-                 temp: float = DEFAULT_TEMP, top_k: int = DEFAULT_TOP_K,
+                 n_ctx: int = DEFAULT_N_CTX, temp: float = DEFAULT_TEMP,
+                 top_k: int = DEFAULT_TOP_K,
                  top_p: float = DEFAULT_TOP_P, runner=None):
         self.model_dir = str(model_dir)
         self.engine_path = str(engine_path)
         self.language = language
         self.ngpu_layers = int(ngpu_layers)
+        self.n_ctx = int(n_ctx)
         self.temp = float(temp)
         self.top_k = int(top_k)
         self.top_p = float(top_p)
@@ -118,6 +123,7 @@ class GgufQwenAdapter:
             ref_text=ref_text,
             language=self.language,
             ngpu_layers=self.ngpu_layers,
+            n_ctx=self.n_ctx,
             temp=self.temp,
             top_k=self.top_k,
             top_p=self.top_p,
@@ -137,6 +143,7 @@ class GgufQwenAdapter:
                 ref_text=getattr(prompt, "ref_text", ""),
                 language=self.language,
                 ngpu_layers=self.ngpu_layers,
+                n_ctx=self.n_ctx,
                 temp=self.temp,
                 top_k=self.top_k,
                 top_p=self.top_p,
@@ -182,6 +189,7 @@ class GgufQwenAdapter:
             "--tts-speaker-file", speaker,
             "--output", str(out_wav),
             "-ngl", str(self.ngpu_layers),
+            "-c", str(self.n_ctx),
             "--temp", str(self.temp),
             "--top-k", str(self.top_k),
             "--top-p", str(self.top_p),
