@@ -386,13 +386,64 @@ class VoiceEditorDialog(QDialog):
                                         "오디오 파일을 분석하는 중입니다. 완료 후 다시 시도해 주세요.")
                 return
             self._validate_register_inputs()
-            self._start_register_worker()
+            if self._model_ready():
+                self._start_register_worker()
+            else:
+                self._prepare_then_register()
         except VoiceStudioError as exc:
             # 모델 미다운로드 등 사용자 안내가 필요한 오류(P12.1-06/07)
             QMessageBox.warning(self, "보이스 스튜디오", exc.user_message)
         except OSError as exc:
             QMessageBox.warning(self, "보이스 스튜디오", f"작업 파일을 준비할 수 없습니다: {exc}")
 
+
+    def _model_ready(self) -> bool:
+        mm = self.context.model_manager
+        dl = getattr(mm, "is_downloaded", None)
+        eng = getattr(mm, "is_engine_ready", None)
+        return (dl is None or dl()) and (eng is None or eng())
+
+    def _prepare_then_register(self):
+        """P18-F2: 등록 전 모델/엔진 자동 준비. 완료 후 등록을 이어서 수행한다.
+
+        UI 스레드 블록 없이 QThread에서 다운로드/해시 검증을 수행하고, 진행률을
+        상태 라벨로 표시한다. 실패 시 안내 후 재시도할 수 있다.
+        """
+        from .main_window import ModelPrepareWorker
+        self._prepare_thread = QThread(self)
+        self._prepare_worker = ModelPrepareWorker(self.context.model_manager)
+        self._prepare_worker.moveToThread(self._prepare_thread)
+        self._prepare_thread.started.connect(self._prepare_worker.run)
+        self._prepare_worker.progress.connect(self._on_prepare_progress)
+        self._prepare_worker.finished.connect(self._on_prepare_finished)
+        self.status_label.setText("음성 모델을 준비하는 중...")
+        self._prepare_thread.start()
+
+    def _on_prepare_progress(self, payload: dict):
+        done, total = payload.get("done", 0), payload.get("total", 0)
+        label = {"download": "음성 모델", "engine": "음성 엔진"}.get(payload.get("stage", ""), "")
+        if total > 0:
+            self.status_label.setText(f"{label} 받는 중... {int(done * 100 / total)}%")
+        else:
+            self.status_label.setText(f"{label} 받는 중...")
+
+    def _on_prepare_finished(self, ok: bool, err: str):
+        thread, self._prepare_thread = getattr(self, "_prepare_thread", None), None
+        self._prepare_worker = None
+        if thread is not None:
+            thread.quit()
+            thread.wait(2000)
+        if not ok:
+            self.status_label.setText("")
+            QMessageBox.warning(self, "보이스 스튜디오", f"모델 준비 실패: {err}")
+            return
+        self.status_label.setText("")
+        try:
+            self._start_register_worker()
+        except VoiceStudioError as exc:
+            QMessageBox.warning(self, "보이스 스튜디오", exc.user_message)
+        except OSError as exc:
+            QMessageBox.warning(self, "보이스 스튜디오", f"작업 파일을 준비할 수 없습니다: {exc}")
 
     def _validate_register_inputs(self):
         """register worker 시작 전 UI 입력 검증(P12.1-06)."""
@@ -536,6 +587,11 @@ class VoiceEditorDialog(QDialog):
         # 등록 worker 실행 중이 아니면 coordinator를 건드리지 않고, 실행 중이면
         # worker 종료를 요청한다. slot 반납은 _on_register_finished에서 수행하므로
         # 다른 화면이 점유한 narrate slot을 여기서 풀 수 없다.
+        thread = getattr(self, "_prepare_thread", None)
+        if thread is not None:
+            thread.quit()
+            thread.wait(2000)
+            self._prepare_thread = None
         if self._worker is not None:
             terminate = getattr(self._worker, "terminate", None)
             if callable(terminate):

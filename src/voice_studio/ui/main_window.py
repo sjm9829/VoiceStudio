@@ -9,13 +9,14 @@ worker 실행 계약:
 
 from __future__ import annotations
 import datetime
+import threading
 import logging
 import os
 import shutil
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QProcess, QTimer, QUrl, Signal, QObject
+from PySide6.QtCore import Qt, QProcess, QTimer, QThread, QUrl, Signal, QObject
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
                                QPushButton, QPlainTextEdit, QLabel, QFileDialog, QMessageBox,
@@ -32,6 +33,9 @@ from ..core.paths import safe_job_cache_dir
 from ..workers.linebuffer import JsonlBuffer
 from .voice_manager_dialog import VoiceManagerDialog
 
+_WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL",
+                     *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
 PHASE_KO = {
     "model_loading": "모델을 준비하는 중…",
     "analyzing_reference": "목소리 특징을 분석하는 중…",
@@ -41,7 +45,9 @@ PHASE_KO = {
     "done": "완료",
 }
 
-class _ModelPrepareWorker(QObject):
+_DETACHED_PREPARE: set = set()  # 닫힌 창의 준비 스레드가 끝날 때까지 참조 유지(GC 방지)
+
+class ModelPrepareWorker(QObject):
     """P18-5: 백그라운드에서 모델+엔진 준비. progress(dict), finished(bool,str) 시그널."""
 
     progress = Signal(dict)
@@ -76,8 +82,18 @@ class MainWindow(QMainWindow):
         self._cancel_requested = False
         self._last_output: str | None = None
         self._result_received = False
+        self._dl_thread: QThread | None = None
+        self._dl_worker = None
+        self._dl_callbacks: list = []
+        self._retry_btn = None
+        self._gen_voice_uuid: str | None = None
+        self._gen_voice_name: str | None = None
+        self._gen_finished_at: datetime.datetime | None = None
         self._build_ui()
         self._refresh_voices()
+        self._refresh_save_location_label()
+        if not self._model_ready():  # P18-F2: 준비 안 됐을 때만 백그라운드 확인/다운로드
+            self._startup_model_check()
 
     def _build_ui(self):
         central = QWidget(); self.setCentralWidget(central)
@@ -184,6 +200,20 @@ class MainWindow(QMainWindow):
         player_row.addWidget(volume_label)
         player_row.addWidget(self.volume_slider)
         result_layout.addLayout(player_row)
+
+        # P18-F4: 저장 위치 표시 + 폴더 선택(설정 메뉴 없이 메인 화면에서 변경)
+        saveloc_row = QHBoxLayout()
+        saveloc_title = QLabel("저장 위치")
+        saveloc_title.setObjectName("hintLabel")
+        self.save_location_label = QLabel("")
+        self.save_location_label.setObjectName("mutedLabel")
+        self.save_location_label.setWordWrap(True)
+        choose_dir_btn = QPushButton("폴더 선택")
+        choose_dir_btn.clicked.connect(self.choose_output_dir)
+        saveloc_row.addWidget(saveloc_title)
+        saveloc_row.addWidget(self.save_location_label, 1)
+        saveloc_row.addWidget(choose_dir_btn)
+        result_layout.addLayout(saveloc_row)
 
         result_buttons = QHBoxLayout()
         self.save_btn = QPushButton("MP3 저장")
@@ -312,17 +342,51 @@ class MainWindow(QMainWindow):
         if not profiles:
             self.status_label.setText("목소리를 먼저 등록해 주세요.")
 
+    def _save_dir(self) -> Path:
+        return Path(self.context.settings.get("mp3_output_dir", "") or default_mp3_dir())
+
+    def _refresh_save_location_label(self):
+        self.save_location_label.setText(str(self._save_dir()))
+
+    def choose_output_dir(self):
+        start = str(self._save_dir())
+        chosen = QFileDialog.getExistingDirectory(self, "저장 폴더 선택", start)
+        if not chosen:
+            return
+        try:
+            Path(chosen).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            QMessageBox.warning(self, "보이스 스튜디오", f"저장 폴더를 만들 수 없습니다: {e}")
+            return
+        self.context.save_settings({**self.context.settings, "mp3_output_dir": chosen})
+        self._refresh_save_location_label()
+
+    def _startup_model_check(self):
+        """P18-F2: 앱 시작 시 백그라운드로 모델/엔진 확인·자동 준비. UI는 먼저 표시된다."""
+        QTimer.singleShot(0, lambda: self._ensure_model_async(self._on_startup_model_ready))
+
+    def _on_startup_model_ready(self, ok: bool):
+        if ok and self.isVisible():
+            self.status_label.setText("음성 생성 준비 완료")
+
     def open_manager(self):
         dlg = VoiceManagerDialog(self.context, self)
         dlg.exec()
         self._refresh_voices()
 
         # ---- 생성 ----
+    def _remember_generation_voice(self, profile_uuid: str):
+        """P18-F5: 생성 시작 시점의 프로필 uuid/이름을 저장해 저장 시 이름 고정."""
+        self._gen_voice_uuid = profile_uuid
+        idx = self.voice_combo.findData(profile_uuid)
+        self._gen_voice_name = self.voice_combo.itemText(idx) if idx >= 0 else None
+
     def start_generation(self):
         profile_uuid = self.voice_combo.currentData()
         if profile_uuid is None:
             QMessageBox.information(self, "보이스 스튜디오", "목소리를 먼저 등록해 주세요.")
             return
+        self._remember_generation_voice(profile_uuid)
         script = self.script_edit.toPlainText().strip()
         if not script:
             QMessageBox.information(self, "보이스 스튜디오", "대본을 입력해 주세요.")
@@ -479,6 +543,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText("작업을 취소했습니다.")
             self._cleanup_job()
         elif code == 0 and self._result_received and self._last_output:
+            self._gen_finished_at = datetime.datetime.now()  # P18-F5
             self._set_status("done", 0, 0)
             self.save_btn.setEnabled(True)
             self.open_folder_btn.setEnabled(True)
@@ -553,11 +618,11 @@ class MainWindow(QMainWindow):
         """마지막 결과(또는 설정된 출력 폴더)를 파일 관리자로 연다(P17-B)."""
         import subprocess
         targets = []
-        if self._last_output and Path(self._last_output).exists():
-            targets.append(str(Path(self._last_output).parent))
-        out_dir = self.context.settings.get("mp3_output_dir", "")
+        out_dir = self.context.settings.get("mp3_output_dir", "")  # P18-F4: 실제 저장 위치 우선
         if out_dir:
             targets.append(out_dir)
+        if self._last_output and Path(self._last_output).exists():
+            targets.append(str(Path(self._last_output).parent))
         if not targets:
             QMessageBox.information(self, "보이스 스튜디오", "아직 열 폴더가 없습니다.")
             return
@@ -596,24 +661,34 @@ class MainWindow(QMainWindow):
 
 
     def _auto_save_path(self):
-        """P18-8: 목소리명_YYYYMMDD_HHMMSS.mp3. 한글 유지, 금지문자 치환, 중복 시 _2/_3."""
+        """P18-F5: 목소리명_YYYYMMDD_HHMMSS.mp3. 생성 시작 시점 이름 고정, 금지문자/예약명 처리, 중복 시 _2/_3, 덮어쓰기 없음."""
         import re as _re
-        from datetime import datetime as _dt
-        name = self.voice_combo.currentText() or "나레이션"
+        name = self._gen_voice_name or "나레이션"
         safe = _re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip().rstrip(".") or "나레이션"
-        out_dir = Path(self.context.settings.get("mp3_output_dir", "") or default_mp3_dir())
+        if safe.upper() in _WINDOWS_RESERVED:  # Windows 예약 파일명
+            safe = f"_{safe}"
+        out_dir = self._save_dir()
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             return None
-        stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
-        cand = out_dir / f"{safe}_{stamp}.mp3"
+        stamp = (self._gen_finished_at or datetime.datetime.now()).strftime("%Y%m%d_%H%M%S")
+
+        def _exclusive(path: Path) -> Path | None:
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)  # 덮어쓰기 없는 생성
+            except FileExistsError:
+                return None
+            except OSError:
+                return path  # excl 미지원 등: 존재 확인 기반 폴백
+            os.close(fd)
+            return path
+
+        cand = _exclusive(out_dir / f"{safe}_{stamp}.mp3")
         n = 2
-        while cand.exists():
-            cand = out_dir / f"{safe}_{stamp}_{n}.mp3"
+        while cand is None and n <= 99:
+            cand = _exclusive(out_dir / f"{safe}_{stamp}_{n}.mp3")
             n += 1
-            if n > 99:
-                break
         return cand
 
     def _model_ready(self) -> bool:
@@ -629,16 +704,24 @@ class MainWindow(QMainWindow):
 
     def _ensure_model_async(self, done):
         """P18-5: 모델/엔진 미준비 시 자동 다운로드(무결성 검증 포함). 실패 시 다시 시도 버튼."""
+        if self._dl_thread is not None:  # P18-F2: 단일 준비 작업 공유(중복 다운로드 금지)
+            self._dl_callbacks.append(done)
+            return
         self.generate_btn.setEnabled(False)
         self.status_label.setText("음성 모델을 준비하는 중...")
         mm = self.context.model_manager
-        self._dl_thread = QThread(self)
-        self._dl_worker = _ModelPrepareWorker(mm)
-        self._dl_worker.moveToThread(self._dl_thread)
-        self._dl_thread.started.connect(self._dl_worker.run)
-        self._dl_worker.progress.connect(self._on_model_progress)
-        self._dl_worker.finished.connect(self._on_model_finished)
+        try:  # P18-F2: 다운로더 모듈을 UI 스레드에서 미리 적재(백그라운드 import 경합 방지)
+            from huggingface_hub import HfApi, hf_hub_download  # noqa: F401
+        except Exception:  # noqa: BLE001 - 오프라인 환경 허용, worker에서 재시도
+            pass
+        worker = ModelPrepareWorker(mm)
+        worker.progress.connect(self._on_model_progress)
+        worker.finished.connect(self._on_model_finished)
+        self._dl_thread = threading.Thread(
+            target=worker.run, name="voice-prepare", daemon=True)
+        self._dl_worker = worker
         self._dl_done = done
+        self._dl_callbacks = [done]
         self._dl_thread.start()
 
     def _on_model_progress(self, payload: dict):
@@ -656,6 +739,8 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"{label} 받는 중...")
 
     def _on_model_finished(self, ok: bool, err: str):
+        if self._dl_thread is None:  # closeEvent 등으로 이미 정리된 경우 무시
+            return
         self._dl_thread.quit()
         self._dl_thread.wait(2000)
         self._dl_thread = None
@@ -665,11 +750,13 @@ class MainWindow(QMainWindow):
         if ok:
             self._clear_model_retry()
             self.status_label.setText("")
-            cb = self._dl_done
+            callbacks, self._dl_callbacks = self._dl_callbacks, []
             self._dl_done = None
-            if cb:
-                cb(True)
+            for cb in callbacks:
+                if cb:
+                    cb(True)
         else:
+            self._dl_callbacks = []  # P18-F2: 재시도 버튼으로 재요청(대기 콜백 폐기)
             self.status_label.setText(f"모델 준비 실패: {err}")
             self._show_model_retry()
 
@@ -692,11 +779,12 @@ class MainWindow(QMainWindow):
 
     def _retry_model_prepare(self):
         self._clear_model_retry()
-        self._ensure_model_async(self._dl_done)
+        self._ensure_model_async(lambda ok: self._on_startup_model_ready(ok))
 
     def _continue_generation(self, profile_uuid: str, script: str):
         if not self.isVisible():
             return
+        self._remember_generation_voice(profile_uuid)
         try:
             if not self._start_worker(self._build_job(profile_uuid, script)):
                 return
@@ -717,5 +805,29 @@ class MainWindow(QMainWindow):
             if callable(terminate):
                 terminate()
                 QTimer.singleShot(3000, self._worker.kill)  # terminate 실패 시 강제 종료
+        # P18-F2: 실행 중 모델 준비 QThread를 안전 종료(파괴 중 running thread 방지).
+        thread = getattr(self, "_dl_thread", None)
+        if thread is not None:
+            self._dl_thread = None
+            self._dl_worker = None
+            worker = self._dl_worker
+            for sig_name in ("progress", "finished"):  # 삭제될 창으로의 시그너스 연결 해제
+                sig = getattr(worker, sig_name, None)
+                if sig is not None:
+                    try:
+                        sig.disconnect()
+                    except (RuntimeError, TypeError):
+                        pass
+            thread.setParent(None)
+            thread.finished.connect(thread.deleteLater)
+            if worker is not None:  # 파이썬/Qt 참조 유지: 실행 중 GC 수거 방지
+                worker.setParent(None)
+                _DETACHED_PREPARE.add(worker)
+                thread.finished.connect(lambda w=worker: _DETACHED_PREPARE.discard(w))
+            else:
+                _DETACHED_PREPARE.add(thread)
+                thread.finished.connect(lambda th=thread: _DETACHED_PREPARE.discard(th))
+            thread.quit()
+            thread.wait(2000)
         self._cleanup_job()
         super().closeEvent(event)

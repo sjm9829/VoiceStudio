@@ -96,7 +96,7 @@ def test_save_mp3_moves_pointer_and_deletes_cache(qtbot, tmp_path, monkeypatch):
     src = job_dir / "result.mp3"; src.write_bytes(b"data")
     out_dir = tmp_path / "out"; out_dir.mkdir()
     win.context.settings["mp3_output_dir"] = str(out_dir)
-    monkeypatch.setattr(type(win.voice_combo), "currentText", lambda self: "테스트음색", raising=False)
+    win._gen_voice_name = "테스트음색"  # P18-F5: 생성 시작 시점 이름 고정
     monkeypatch.setattr("voice_studio.ui.main_window.QMessageBox.information",
                         staticmethod(lambda *a, **k: None))
     win._job_dir = job_dir
