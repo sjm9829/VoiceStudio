@@ -8,7 +8,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 def test_dev_diagnostics_command_uses_main_entrypoint():
     from voice_studio.workers.launcher import diagnostics_command
     program, args = diagnostics_command()
-    assert program == sys.executable
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    expected = (
+        str(pythonw)
+        if sys.platform == "win32" and pythonw.is_file()
+        else sys.executable
+    )
+    assert program == expected
     assert args[:4] == ["-m", "voice_studio.main", "--diagnostics", "--json"]
     assert args[-1] == "--log"
     assert "-m voice_studio.diagnostics" not in " ".join(args)

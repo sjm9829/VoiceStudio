@@ -68,7 +68,13 @@ def test_unknown_mode_and_version():
 def test_dev_worker_command_uses_same_entrypoint():
     assert not is_frozen()
     program, args = worker_command("/tmp/job.json")
-    assert program == sys.executable
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    expected = (
+        str(pythonw)
+        if sys.platform == "win32" and pythonw.is_file()
+        else sys.executable
+    )
+    assert program == expected
     assert args[:3] == ["-m", "voice_studio.main", "--worker"]
 
 
