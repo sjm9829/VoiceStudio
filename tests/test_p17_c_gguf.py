@@ -341,3 +341,91 @@ def test_prepare_speaker_accepts_official_prompt_spec():
     gg = GgufPromptSpec(ref_text="gg")
     out2 = adapter.prepare_speaker(gg, "/x.wav")
     assert out2.speaker_wav == "/x.wav" and out2.ref_text == "gg"
+
+
+# ---- P17-H2: 설정 다이얼로그 선택-다운로드 일치 ----
+
+def test_settings_dialog_download_uses_selected_backend(qtbot, tmp_path, monkeypatch):
+    """gguf 선택 후 모델 받기 -> context.manager가 아니라 선택 백엔드 manager로 다운로드한다."""
+    from voice_studio.ui.settings_dialog import SettingsDialog
+    from voice_studio.infra.gguf_adapter import GgufQwenAdapter  # noqa: F401
+    calls = []
+
+    class _Mgr:
+        def status_text(self):
+            return "mgr-status"
+
+    class _Ctx:
+        settings = {"tts_backend": "official"}
+        model_manager = _Mgr()
+
+    import voice_studio.services.gguf_model_manager as gmm_mod
+    import voice_studio.services.model_manager as mm_mod
+
+    class _FakeGgufMgr:
+        def __init__(self, *a, **k):
+            pass
+        def status_text(self):
+            return "gguf-status"
+        def download(self, force=False):
+            calls.append(("gguf", force))
+            return tmp_path / "m"
+        def is_engine_ready(self):
+            calls.append(("engine_ready", True))
+            return True
+
+    class _FakeOffMgr:
+        def __init__(self, *a, **k):
+            pass
+        def status_text(self):
+            return "official-status"
+        def download(self, force=False):
+            calls.append(("official", force))
+            return tmp_path / "o"
+
+    monkeypatch.setattr(gmm_mod, "GgufModelManager", _FakeGgufMgr)
+    monkeypatch.setattr("voice_studio.ui.settings_dialog.ModelManager", _FakeOffMgr)
+    dlg = SettingsDialog(_Ctx())
+    dlg.backend_combo.setCurrentIndex(dlg.backend_combo.findData("gguf"))
+    # 스레드 대신 동기 실행으로 대체해 계약만 확인
+    class _SyncThread:
+        def __init__(self, mgr, force=False):
+            self.mgr = mgr; self.force = force
+            self.done = type("S", (), {"connect": staticmethod(lambda f: None)})()
+            self.failed = type("S", (), {"connect": staticmethod(lambda f: None)})()
+        def start(self):
+            self.mgr.download(force=self.force)
+    monkeypatch.setattr("voice_studio.ui.settings_dialog._ModelDownloadThread", _SyncThread)
+    dlg.download_model()
+    assert ("gguf", False) in calls
+    dlg2 = SettingsDialog(_Ctx())
+    dlg2.backend_combo.setCurrentIndex(dlg2.backend_combo.findData("official"))
+    dlg2.download_model(force=True)
+    assert ("official", True) in calls
+
+
+def test_model_download_thread_prepares_gguf_engine(tmp_path, monkeypatch):
+    """_ModelDownloadThread는 gguf manager 다운로드 후 엔진 미준비 시 download_engine을 호출한다."""
+    from voice_studio.ui.settings_dialog import _ModelDownloadThread
+    import voice_studio.ui.settings_dialog as sd_mod
+    calls = []
+
+    class _Mgr:
+        def download(self, force=False):
+            calls.append("download")
+            return tmp_path
+        def is_engine_ready(self):
+            calls.append("check")
+            return False
+        def download_engine(self):
+            calls.append("engine")
+            return tmp_path
+
+    results = []
+    th = _ModelDownloadThread(_Mgr())
+    th.done.connect(lambda p: results.append(("done", p)))
+    th.failed.connect(lambda m: results.append(("failed", m)))
+    qt_app = None
+    th.run()  # QThread.run 직접 호출(스레드 미생성)
+    assert ("done", str(tmp_path)) in results
+    assert "engine" in calls

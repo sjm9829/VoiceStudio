@@ -27,6 +27,13 @@ class _ModelDownloadThread(QThread):
         from ..core.errors import VoiceStudioError
         try:
             path = self.model_manager.download(force=self.force)
+            # GGUF 백엔드 선택 시 llama.cpp 엔진도 함께 준비한다(P17-H2).
+            # 기존 정상 엔진이 있으면 재다운로드하지 않는다.
+            engine_ready = getattr(self.model_manager, "is_engine_ready", None)
+            if engine_ready is not None and not engine_ready():
+                download_engine = getattr(self.model_manager, "download_engine", None)
+                if download_engine is not None:
+                    download_engine()
             self.done.emit(str(path))
         except VoiceStudioError as exc:
             # 앱 오류는 검증된 사용자 안내만 노출하고 기술 상세는 로그로 남긴다(P13 hotfix).
@@ -158,13 +165,20 @@ class SettingsDialog(QDialog):
         self.quality.setCurrentIndex(index if index >= 0 else 1)
 
     def download_model(self, force=False):
-        """모델 다운로드를 별도 스레드로 실행해 UI freeze를 막는다(P12.2-14)."""
+        """모델 다운로드를 별도 스레드로 실행해 UI freeze를 막는다(P12.2-14, P17-H2).
+
+        저장 전이라도 콤보에서 선택한 백엔드의 모델을 받는다(_current_manager).
+        GGUF 선택 시 엔진도 함께 준비한다(_ModelDownloadThread 내 처리).
+        """
         if getattr(self, "_dl_thread", None) is not None and self._dl_thread.isRunning():
             return  # 중복 클릭 무시
+        manager = self._current_manager()
+        self._dl_backend = self.backend_combo.currentData()
         self.dl_progress.setVisible(True)
+        self.model_label.setText(manager.status_text())
         for b in self.download_buttons:
             b.setEnabled(False)
-        self._dl_thread = _ModelDownloadThread(self.context.model_manager, force=force)
+        self._dl_thread = _ModelDownloadThread(manager, force=force)
         self._dl_thread.done.connect(self._on_download_done)
         self._dl_thread.failed.connect(self._on_download_failed)
         self._dl_thread.start()
@@ -173,7 +187,12 @@ class SettingsDialog(QDialog):
         self.dl_progress.setVisible(False)
         for b in self.download_buttons:
             b.setEnabled(True)
-        self.model_label.setText(self.context.model_manager.status_text())
+        # 방금 다운로드한 백엔드의 상태를 표시한다(저장 전 선택 기준, P17-H2).
+        from ..services.gguf_model_manager import GgufModelManager
+        if getattr(self, "_dl_backend", None) == "gguf":
+            self.model_label.setText(GgufModelManager().status_text())
+        else:
+            self.model_label.setText(ModelManager().status_text())
 
     def _on_download_failed(self, message: str):
         self.dl_progress.setVisible(False)
