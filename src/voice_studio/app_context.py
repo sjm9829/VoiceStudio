@@ -14,7 +14,6 @@ from .infra.settings_repository import SettingsRepository
 from .infra.profile_repository import ProfileRepository
 from .services.audio_service import AudioService
 from .services.profile_service import ProfileService
-from .services.model_manager import ModelManager
 from .services.transcription_service import FasterWhisperTranscriber
 from .core.job_coordinator import JobCoordinator
 
@@ -23,16 +22,12 @@ class AppContext:
 
     @staticmethod
     def _make_model_manager(settings: dict):
-        """settings['tts_backend']에 따라 음성 모델 관리자를 선택한다(P17-C).
+        """P18-1: 단일 백엔드. Qwen3-TTS 1.7B Q8_0 GGUF + llama.cpp 엔진 관리자만 사용.
 
-        - "gguf": Qwen3-TTS 1.7B Q8_0 GGUF + llama.cpp 엔진 관리자.
-        - 기본("official"): 기존 0.6B HF 스냅샷 관리자(변경 없음).
+        과거 settings['tts_backend']=official 선택값은 무력화(항상 gguf).
         """
         from .services.gguf_model_manager import GgufModelManager
-        backend = (settings or {}).get("tts_backend", "official")
-        if backend == "gguf":
-            return GgufModelManager()
-        return ModelManager()
+        return GgufModelManager()
 
     def save_settings(self, data: dict) -> None:
         """설정을 저장하고 self.settings를 최신 값으로 갱신한다(P12.2-01)."""

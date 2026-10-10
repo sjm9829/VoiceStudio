@@ -446,7 +446,8 @@ class VoiceEditorDialog(QDialog):
                 ref_text=self.transcript_edit.toPlainText().strip(),
                 profile_dir=str(self.context.profile_repository.root),
                 model_path=self.context.model_manager.model_path(),
-                tts_backend=str(self.context.settings.get("tts_backend", "official")))
+                tts_backend="gguf",  # P18-1 단일 백엔드
+            )
             job_dir = safe_job_cache_dir(job["job_id"])
             job_file = job_dir / "job.json"
             job_file.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")

@@ -8,7 +8,7 @@ import pytest
 
 torch = pytest.importorskip("torch", reason="torch 미설치 환경")
 from voice_studio.infra.qwen_adapter import preferred_dtype, RealQwenAdapter
-from voice_studio.workers.worker_main import _require_model_path, _release_gpu
+from voice_studio.workers.worker_main import _release_gpu
 
 
 def _inject_fake_qwen_tts(monkeypatch, fake_model):
@@ -62,21 +62,15 @@ def test_adapter_flash_attention_failure_falls_back(monkeypatch):
     assert calls == ["flash_attention_2", None]
 
 
-def test_worker_requires_model_path(tmp_path):
-    """P12.2-26: model_path 비었거나 없으면 E_MODEL_NOT_DOWNLOADED, HF 다운로드 금지."""
-    import types as t
+def test_worker_gguf_adapter_requires_cached_model(tmp_path, monkeypatch):
+    """P18-1: worker는 GGUF 캐시 경로를 필수로 요구한다(E_MODEL_NOT_DOWNLOADED 유지)."""
     from voice_studio.core.errors import VoiceStudioError
-    job = t.SimpleNamespace(job_id="j", mode="narrate", model_path="")
+    from voice_studio.workers import worker_main
+    monkeypatch.setenv("VOICE_STUDIO_DATA_DIR", str(tmp_path / "appdata"))
+    job = types.SimpleNamespace(job_id="j", mode="narrate")
     with pytest.raises(VoiceStudioError) as e:
-        _require_model_path(job)
+        worker_main._gguf_adapter(job)
     assert e.value.code == "E_MODEL_NOT_DOWNLOADED"
-    job.model_path = str(tmp_path / "nope")
-    with pytest.raises(VoiceStudioError) as e:
-        _require_model_path(job)
-    assert e.value.code == "E_MODEL_NOT_DOWNLOADED"
-    snap = tmp_path / "snap"; snap.mkdir()
-    job.model_path = str(snap)
-    assert _require_model_path(job) == str(snap)
 
 
 def test_worker_gpu_cleanup_in_finally_structure():

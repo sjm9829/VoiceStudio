@@ -46,22 +46,6 @@ def _write_failure_log(job, exc: Exception) -> None:
         pass
 
 
-def _require_model_path(job) -> str:
-    """production worker는 로컬 스냅샷 경로를 필수로 요구한다(P12.2-26/P12.3-08).
-
-    비어 있으면 HF 자동 다운로드(수 GB 예상치 못한 트래픽/오랜 대기) 대신
-    ModelNotDownloadedError(코드 E_MODEL_NOT_DOWNLOADED)로 명확히 실패한다.
-    VoiceStudioError의 positional 인수는 detail 하나뿐이므로(P12.3-24) 구체적
-    subclass를 사용하고, UI 메시지는 class user_message를 쓴다.
-    """
-    path = (getattr(job, "model_path", "") or "").strip()
-    if not path:
-        raise ModelNotDownloadedError("worker job에 model_path가 없습니다.")
-    if not Path(path).is_dir():
-        raise ModelNotDownloadedError(f"model path not found: {path}")
-    return path
-
-
 def _gguf_adapter(job):
     """P17-C: GGUF 백엔드 어댑터 구성. 검증된 모델 캐시/엔진이 없으면 명시적으로 실패한다."""
     from voice_studio.services.gguf_model_manager import GgufModelManager
@@ -96,16 +80,10 @@ def _release_gpu() -> None:
 
 
 def run_register(job) -> None:
+    """P18-1: 단일 gguf 백엔드. 구 프로필(tts_backend=official)도 동일 경로로 처리한다."""
     emit(status_event("model_loading", job_id=job.job_id))
-    if getattr(job, "tts_backend", "official") == "gguf":
-        # GGUF 백엔드: 모델 캐시/엔진 경로 기반. 0.6B 스냅샷 경로는 요구하지 않는다.
-        qwen = _gguf_adapter(job)
-    else:
-        model_path = _require_model_path(job)
+    qwen = _gguf_adapter(job)
     repo, audio, service = _make_services(job.profile_dir)
-    if getattr(job, "tts_backend", "official") != "gguf":
-        from voice_studio.infra.qwen_adapter import RealQwenAdapter, production_device
-        qwen = RealQwenAdapter(model_path=model_path, device=production_device())
     emit(status_event("analyzing_reference", job_id=job.job_id))
     pcm = audio.decode_reference_segment(job.source_path, job.start_s, job.end_s)
     spec = qwen.create_prompt(pcm, 24000, job.ref_text.strip())
@@ -119,16 +97,10 @@ def run_register(job) -> None:
 
 
 def run_narrate(job) -> None:
+    """P18-1: 단일 gguf 백엔드. 구 official 프로필은 reference 기반 gguf 생성으로 처리."""
     emit(status_event("model_loading", job_id=job.job_id))
-    gguf_mode = getattr(job, "tts_backend", "official") == "gguf"
-    if gguf_mode:
-        qwen = _gguf_adapter(job)
-    else:
-        model_path = _require_model_path(job)  # P12.3-09: narrate도 HF fallback 금지
+    qwen = _gguf_adapter(job)
     repo, audio, service = _make_services(job.profile_dir)
-    if not gguf_mode:
-        from voice_studio.infra.qwen_adapter import RealQwenAdapter, production_device
-        qwen = RealQwenAdapter(model_path=model_path, device=production_device())
     from voice_studio.services.narration_service import NarrationService
     from voice_studio.domain.generation_job import GenerationJob, JobStatus
     narration = NarrationService(qwen, audio, repo)
@@ -138,22 +110,14 @@ def run_narrate(job) -> None:
         status=JobStatus.PENDING, segments=list(job.segments), gap_flags=list(job.gap_flags),
         failed_chunks=[], output_path=None)
     prompt = service.load_prompt_spec(job.profile_uuid)
-    # P17-H4: 프로필-백엔드 호환 명시. gguf 프로필을 official에서 쓰면 placeholder 텐서라 품질 무보장.
-    profile = service.get(job.profile_uuid)
-    saved_backend = getattr(profile, "tts_backend", "official") or "official"
-    if not gguf_mode and saved_backend == "gguf":
-        raise VoiceStudioError(
-            "이 목소리는 GGUF 백엔드로 등록되어 공식 0.6B 생성과 호환되지 않습니다. "
-            "설정에서 GGUF 백엔드를 선택하거나 공식 백엔드로 목소리를 다시 등록해 주세요.")
-    if gguf_mode:
-        # GGUF 백엔드: 프로필 reference.flac을 job 임시 wav로 재인코딩해 speaker로 사용한다.
-        # 기존 ref_code/ref_spk_embedding 텐서는 0.6B 전용이므로 재사용하지 않는다(원문 지시).
-        from voice_studio.core.paths import safe_job_cache_dir
-        from voice_studio.infra.gguf_adapter import write_pcm16_wav
-        ref_pcm = repo.load_reference_pcm(job.profile_uuid, 24000)
-        speaker_wav = safe_job_cache_dir(job.job_id) / "reference_24k.wav"
-        write_pcm16_wav(speaker_wav, ref_pcm, 24000)
-        prompt = qwen.prepare_speaker(prompt, speaker_wav)
+    # P18-1: 단일 gguf. 프로필 reference.flac을 job 임시 wav로 재인코딩해 speaker로 사용한다.
+    # 구 official 프로필의 ref_code/ref_spk_embedding 텐서는 0.6B 전용이라 재사용하지 않는다.
+    from voice_studio.core.paths import safe_job_cache_dir
+    from voice_studio.infra.gguf_adapter import write_pcm16_wav
+    ref_pcm = repo.load_reference_pcm(job.profile_uuid, 24000)
+    speaker_wav = safe_job_cache_dir(job.job_id) / "reference_24k.wav"
+    write_pcm16_wav(speaker_wav, ref_pcm, 24000)
+    prompt = qwen.prepare_speaker(prompt, speaker_wav)
     emit(status_event("generating", job_id=job.job_id, total=len(job.segments)))
     # P15: VOICE_STUDIO_DIAGNOSTICS_DIR 환경 변수를 명시한 경우에만 진단 파일을 남긴다.
     # VOICE_STUDIO_TTS_LANGUAGE로 공식 language 인자를 옵트인한다(기본 None = Auto 유지).

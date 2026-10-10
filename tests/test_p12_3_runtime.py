@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import pytest
 
 from voice_studio.core.errors import ModelNotDownloadedError, VoiceStudioError
-from voice_studio.workers.worker_main import _require_model_path
+from voice_studio.workers import worker_main
 
 
 def _job(**kw):
@@ -46,11 +46,13 @@ def test_narrate_empty_model_path_raises_not_downloaded(tmp_path, monkeypatch):
     assert not constructed  # HF repo ID fallback으로 어댑터가 만들어지지 않았다
 
 
-def test_missing_model_dir_raises_for_both_modes(tmp_path):
-    from voice_studio.workers.worker_main import _require_model_path
-    for mp in ("", "  ", str(tmp_path / "missing-model")):
+def test_missing_gguf_cache_raises_for_both_modes(tmp_path, monkeypatch):
+    """P18-1: GGUF 캐시 부재 시 두 mode 모두 E_MODEL_NOT_DOWNLOADED."""
+    from voice_studio.workers import worker_main
+    monkeypatch.setenv("VOICE_STUDIO_DATA_DIR", str(tmp_path / "appdata"))
+    for mode in ("register", "narrate"):
         with pytest.raises(ModelNotDownloadedError):
-            _require_model_path(_job(model_path=mp))
+            worker_main._gguf_adapter(_job(mode=mode))
 
 
 def test_worker_error_event_uses_user_message_not_detail():

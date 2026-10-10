@@ -395,10 +395,11 @@ def test_production_device_cuda_true_returns_cuda():
         assert "cuda" in str(qwen_adapter.production_device())
 
 
-def test_worker_main_uses_production_device():
+def test_worker_main_uses_gguf_engine_contract():
+    """P18-1: worker는 torch device 대신 gguf 어댑터(-ngl 포함 llama-tts)를 사용한다."""
     src = (Path(__file__).resolve().parents[1] / "src" / "voice_studio" / "workers" / "worker_main.py").read_text(encoding="utf-8")
-    assert "production_device()" in src
-    assert "default_device()" not in src
+    assert "_gguf_adapter" in src
+    assert "GgufQwenAdapter" in src
 
 
 # ---------------------------------------------------------------- worker stderr

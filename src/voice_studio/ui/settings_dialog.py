@@ -224,6 +224,7 @@ class SettingsDialog(QDialog):
         backend = self.context.settings.get("tts_backend", "official")
         if backend == "gguf" and not isinstance(self.context.model_manager, GgufModelManager):
             self.context.model_manager = GgufModelManager()
-        elif backend != "gguf" and isinstance(self.context.model_manager, GgufModelManager):
-            self.context.model_manager = ModelManager()
+        # P18-1: 단일 gguf - 어떤 저장값이든 manager 교체 없이 GgufModelManager 유지.
+        if not isinstance(self.context.model_manager, GgufModelManager):
+            self.context.model_manager = GgufModelManager()
         self.accept()
