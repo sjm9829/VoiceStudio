@@ -204,6 +204,8 @@ def main(argv: list[str] | None = None) -> int:
     cleanup_preview_cache()  # 시작 시 남은 미리듣기 임시 WAV 정리(P12.1-14)
     cleanup_stale_jobs()  # 비정상 종료로 남은 작업 캐시 정리(P12.3-19)
     app = QApplication(args)
+    from voice_studio.ui.theme import apply_app_style
+    apply_app_style(app)  # P17-B: 공통 밝은 테마
     window = MainWindow(create_context())
     window.show()
     return app.exec()
