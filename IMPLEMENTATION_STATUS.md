@@ -555,3 +555,22 @@ CUDA 강제, worker stderr logging, UI detail 비노출, -ss+-t segment 계약)�
 - **CODE READY / WINDOWS SOURCE E2E REQUIRED / WINDOWS FROZEN E2E REQUIRED / WINDOWS FROZEN STT REQUIRED**.
 - 이 개발 환경에 GPU가 없어 `pytest -m gpu`, source E2E, frozen smoke, frozen E2E, frozen STT smoke은
   **NOT RUN**이며 Windows 실기에서 validate_runtime_gpu_windows.bat로 수행해야 한다.
+
+
+## P17 Hotfix (H1~H8, 2026-10)
+
+### 완료 (코드/테스트)
+- H1 `bfcb3db`: frozen `_MEIPASS`/exe-인접 엔진 경로, dist GGUF 검증, 엔진 zip SHA-256 atomic 교체.
+- H2 `4d6e410`: 설정 다운로드가 선택 백엔드 사용, GGUF 엔진 동시 준비, 상태 표시 분리.
+- H3 `47c2af5`: PySide6 6.11.2 `setCreateProcessArgumentsModifier` 미지원 확인 → dev Windows `pythonw.exe` 우선,
+  `apply_no_window` 지원 여부 반환, gguf `_engine_version` no-window 래퍼.
+- H4 `0f21523`: 프로필 `tts_backend` 기록, gguf 프로필의 official narrate 명확 차단(0.6B↔gguf 상호 경로 명시),
+  다중 구간 동일 참조, 한글 경로 명령 구성 회귀.
+- H5 `44460c9`: `-c 4096` 컨텍스트 상한(8GB 여유, 추정). `-ngl 12` 유지. VRAM/속도 실측 NOT RUN.
+- H6 `7f770f4`: 설정창 열 때 저장된 백엔드 상태 표시. 기본 모델 0.6B 유지(Windows E2E 전).
+- H7 `fdb6698`: 항상-성공 단언 제거, gguf 빈/누락 결과 오류 처리 강화 및 회귀.
+- 전체 테스트: 405 passed / 8 skipped / 7 deselected (`-m "not gpu and not stt"`).
+
+### NOT RUN (Windows 실기 필요)
+- `build_windows.bat` 빌드, frozen smoke, 설치, E2E(등록→재시작→나레이션→재생→MP3), VRAM 실측,
+  RTX 2070 SUPER에서 `-ngl` 튜닝, gguf 기본값 전환 판단.
