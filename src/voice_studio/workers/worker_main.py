@@ -138,6 +138,13 @@ def run_narrate(job) -> None:
         status=JobStatus.PENDING, segments=list(job.segments), gap_flags=list(job.gap_flags),
         failed_chunks=[], output_path=None)
     prompt = service.load_prompt_spec(job.profile_uuid)
+    # P17-H4: 프로필-백엔드 호환 명시. gguf 프로필을 official에서 쓰면 placeholder 텐서라 품질 무보장.
+    profile = service.get(job.profile_uuid)
+    saved_backend = getattr(profile, "tts_backend", "official") or "official"
+    if not gguf_mode and saved_backend == "gguf":
+        raise VoiceStudioError(
+            "이 목소리는 GGUF 백엔드로 등록되어 공식 0.6B 생성과 호환되지 않습니다. "
+            "설정에서 GGUF 백엔드를 선택하거나 공식 백엔드로 목소리를 다시 등록해 주세요.")
     if gguf_mode:
         # GGUF 백엔드: 프로필 reference.flac을 job 임시 wav로 재인코딩해 speaker로 사용한다.
         # 기존 ref_code/ref_spk_embedding 텐서는 0.6B 전용이므로 재사용하지 않는다(원문 지시).

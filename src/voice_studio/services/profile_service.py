@@ -48,11 +48,14 @@ class ProfileService:
         if prompt is None and self.qwen is None:
             raise ProfileError("등록은 별도 worker 프로세스에서 실행해야 합니다.")
         spec = prompt or self.qwen.create_prompt(pcm, sr, ref_text.strip())  # type: ignore[union-attr]
+        from ..infra.gguf_adapter import GgufPromptSpec
+        backend = "gguf" if isinstance(spec, GgufPromptSpec) else "official"
         profile = VoiceProfile(
             name=name.strip(), ref_text=spec.ref_text,
             reference_duration_ms=int(len(pcm) / sr * 1000),
             model_id=getattr(self.qwen, "model_id", config.DEFAULT_MODEL_ID) if self.qwen else config.DEFAULT_MODEL_ID,
             qwen_tts_version=getattr(self.qwen, "model_version", "official-base") if self.qwen else "official-base",
+            tts_backend=backend,
             x_vector_only_mode=spec.x_vector_only_mode, icl_mode=spec.icl_mode,
             ref_code_kind=ref_code_kind_of(spec.ref_code))
         tensors = {"ref_code": encode_ref_code(spec.ref_code),

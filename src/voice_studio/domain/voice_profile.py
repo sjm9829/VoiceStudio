@@ -23,6 +23,7 @@ class VoiceProfile:
     x_vector_only_mode: bool = False
     icl_mode: bool = True
     ref_code_kind: str = "json"  # "tensor": 실제 정수/실수 텐서, "json": JSON blob(fake/legacy)
+    tts_backend: str = "official"  # "official" | "gguf" (P17-H4 프로필-백엔드 호환 판별)
     schema_version: int = 1
 
     def to_metadata(self) -> dict[str, Any]:
