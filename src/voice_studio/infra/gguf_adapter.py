@@ -201,7 +201,8 @@ class GgufQwenAdapter:
 def _engine_version(engine_path: str | Path) -> str:
     """llama-tts --version 출력의 첫 줄(빌드 태그)만 안전하게 추출한다."""
     try:
-        r = subprocess.run([str(engine_path), "--version"], capture_output=True, text=True, timeout=30)
+        from .subprocess_runner import run as _run_no_window
+        r = _run_no_window([str(engine_path), "--version"], capture_output=True, text=True, timeout=30)
         line = (r.stdout or r.stderr or "").strip().splitlines()
         return line[0] if line else "unknown"
     except Exception:

@@ -6,21 +6,26 @@
 
 from __future__ import annotations
 import sys
+from pathlib import Path
 
 
-def apply_no_window(qprocess) -> None:
-    """QProcess로 콘솔 자식 프로세스를 띄울 때 Windows 창 생성을 막는다(P17-A).
+def apply_no_window(qprocess) -> bool:
+    """QProcess 자식의 Windows 콘솔 창 생성을 막는다(P17-A, P17-H3).
 
-    개발 모드에서 worker는 python.exe(콘솔 앱)이므로 검은 CMD 창이 깜빡인다.
-    PySide6가 setCreateProcessArgumentsModifier를 지원하는 환경에서만
-    CREATE_NO_WINDOW를 적용하고, 미지원 플랫폼/API에서는 아무것도 하지 않는다.
-    stdout/stderr 수집과 종료 코드 처리에는 영향이 없다.
+    PySide6 setCreateProcessArgumentsModifier는 6.11 바인딩에 존재하지 않아
+    실제로 적용 가능한 Windows 대체는 다음 둘이다.
+    1. 개발 모드: 콘솔 없는 pythonw.exe로 worker 실행(파이프 stdout/stderr 유지).
+    2. frozen: 진입점 VoiceStudio.exe가 console=False(windowed)라 창이 없다.
+
+    반환값은 적용 여부이며, 미지원 환경에서 조용히 no-op이 되지 않도록
+    worker_command 단계에서 pythonw 치환으로 해결한다. modifier가 지원되는
+    바인딩에서는 CREATE_NO_WINDOW를 추가로 적용한다.
     """
     if sys.platform != "win32":
-        return
+        return False
     modifier = getattr(qprocess, "setCreateProcessArgumentsModifier", None)
     if modifier is None:
-        return
+        return False
 
     import subprocess
 
@@ -28,25 +33,43 @@ def apply_no_window(qprocess) -> None:
         args["creationflags"] = args.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
 
     modifier(_patch)
+    return True
+
+
+def _console_less_python() -> str | None:
+    """개발 모드 콘솔 없는 인터프리터(pythonw.exe). 없으면 None."""
+    if sys.platform != "win32":
+        return None
+    exe = Path(sys.executable)
+    w = exe.with_name("pythonw.exe")
+    return str(w) if w.is_file() else None
+
 
 def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
+
 def worker_command(job_file: str) -> tuple[str, list[str]]:
-    """(프로그램, 인자) 반환. 개발/패키지 환경 모두 같은 진입점(main.py --worker)을 쓴다."""
+    """(프로그램, 인자) 반환. 개발/패키지 모두 같은 진입점(main.py --worker).
+
+    개발 모드 Windows에서는 pythonw.exe를 우선해 콘솔 창 생성을 원천 차단한다(P17-H3).
+    pythonw가 없으면 기존과 같이 sys.executable을 사용한다.
+    """
     if is_frozen():
         return sys.executable, ["--worker", job_file]
-    return sys.executable, ["-m", "voice_studio.main", "--worker", job_file]
+    pythonw = _console_less_python()
+    program = pythonw or sys.executable
+    return program, ["-m", "voice_studio.main", "--worker", job_file]
 
 
 def diagnostics_command() -> tuple[str, list[str]]:
-    """Self-Diagnosis 실행 명령(P12.3-06).
+    """Self-Diagnosis 실행 명령(P12.3-06). 콘솔 억제 규칙은 worker_command과 동일.
 
-    개발: python -m voice_studio.main --diagnostics --json --log
+    개발: python(w) -m voice_studio.main --diagnostics --json --log
     frozen: VoiceStudio.exe --diagnostics --json --log
-    frozen에서 sys.executable은 VoiceStudio.exe이므로 `-m voice_studio.diagnostics`
-    방식은 사용하지 않는다(worker launcher와 동일한 dispatch 패턴).
     """
     if is_frozen():
         return sys.executable, ["--diagnostics", "--json", "--log"]
-    return sys.executable, ["-m", "voice_studio.main", "--diagnostics", "--json", "--log"]
+    pythonw = _console_less_python()
+    program = pythonw or sys.executable
+    return program, ["-m", "voice_studio.main", "--diagnostics", "--json", "--log"]

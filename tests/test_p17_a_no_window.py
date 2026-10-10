@@ -106,3 +106,57 @@ def test_apply_no_window_noop_without_pyside6_support():
 
     qp = _NoSupport()  # setCreateProcessArgumentsModifier 없음
     apply_no_window(qp)  # 예외 없이 통과해야 한다
+
+
+
+# ---- P17-H3: QProcess 미지원 바인딩 대비 콘솔 없는 worker 실행 ----
+
+def test_worker_command_uses_pythonw_on_dev_windows(monkeypatch, tmp_path):
+    """개발 모드 Windows에서 pythonw.exe가 있으면 worker/diagnostics 진입점이 된다."""
+    from voice_studio.workers import launcher
+    fake_py = tmp_path / "python.exe"
+    fake_pyw = tmp_path / "pythonw.exe"
+    fake_py.write_text("")
+    fake_pyw.write_text("")
+    monkeypatch.setattr(launcher.sys, "platform", "win32")
+    monkeypatch.setattr(launcher.sys, "executable", str(fake_py))
+    monkeypatch.setattr(launcher, "is_frozen", lambda: False)
+    program, args = launcher.worker_command("j.json")
+    assert program == str(fake_pyw)
+    assert args == ["-m", "voice_studio.main", "--worker", "j.json"]
+    dprogram, dargs = launcher.diagnostics_command()
+    assert dprogram == str(fake_pyw)
+    assert "--diagnostics" in dargs
+
+
+def test_worker_command_falls_back_to_python_without_pythonw(monkeypatch, tmp_path):
+    """pythonw가 없는 환경에서는 기존과 같이 sys.executable을 쓴다(회귀 방지)."""
+    from voice_studio.workers import launcher
+    fake_py = tmp_path / "python.exe"
+    fake_py.write_text("")
+    monkeypatch.setattr(launcher.sys, "platform", "win32")
+    monkeypatch.setattr(launcher.sys, "executable", str(fake_py))
+    monkeypatch.setattr(launcher, "is_frozen", lambda: False)
+    program, args = launcher.worker_command("j.json")
+    assert program == str(fake_py)
+
+
+def test_worker_command_frozen_uses_sys_executable(monkeypatch):
+    """frozen에서는 VoiceStudio.exe 그대로(콘솔 없는 windowed 빌드)."""
+    from voice_studio.workers import launcher
+    monkeypatch.setattr(launcher, "is_frozen", lambda: True)
+    monkeypatch.setattr(launcher.sys, "executable", "C:/app/VoiceStudio.exe")
+    program, args = launcher.worker_command("j.json")
+    assert program == "C:/app/VoiceStudio.exe"
+    assert args == ["--worker", "j.json"]
+
+
+def test_apply_no_window_returns_supported_state():
+    """지원 바인딩에선 True, 미지원에선 False를 반환해 조용한 실패를 없앤다(P17-H3)."""
+    qp = _FakeQProcess()
+    with mock.patch.object(sys, "platform", "win32"), \
+            mock.patch.object(subprocess, "CREATE_NO_WINDOW", CREATE_NO_WINDOW, create=True):
+        assert apply_no_window(qp) is True
+    class _NoSupportLocal:
+        pass
+    assert apply_no_window(_NoSupportLocal()) is False
