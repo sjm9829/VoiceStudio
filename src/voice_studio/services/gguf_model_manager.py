@@ -123,6 +123,7 @@ class GgufModelManager:
                 raise OfflineError(
                     f"GGUF 모델 파일 검증 실패: {', '.join(broken[:4])}",
                     user_message="모델 파일이 손상되어 받기에 실패했습니다. 다시 시도해 주세요.")
+            (tmp / ".complete").write_text(gguf_cfg.GGUF_MODEL_REVISION)  # 완료 마커도 swap 대상
         except OfflineError:
             raise
         except Exception as exc:

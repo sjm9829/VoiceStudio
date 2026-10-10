@@ -58,6 +58,20 @@
 - 취소(QProcess terminate→kill) 후 ffmpeg 자식 프로세스 잔존 여부는 **실기 미검증** 항목이며,
   P13 실기 체크리스트에서 확인한다(P12.2-19).
 
+## GGUF 음성 엔진 번들(P17-C/D)
+
+- 음성 백엔드는 설정에서 선택한다: `official`(기존 0.6B HF 스냅샷) 또는
+  `gguf`(Qwen3-TTS 1.7B Q8_0 GGUF + llama.cpp).
+- GGUF 모델 가중치는 설치 프로그램에 넣지 않고, 공식 repo의 고정 revision에서
+  SHA-256 검증 후 내려받는다(기존 0.6B 정책과 동일).
+- llama.cpp 실행 엔진은 고정 release `b11540`의 `win-cuda-12.4-x64` + `cudart`만
+  사용한다. `scripts/build_windows.bat`가 `scripts/fetch_gguf_engine.py`로
+  `packaging/engine-src/llama-cuda`를 준비하고 PyInstaller spec이 `<app>/engine/llama-cuda`로
+  번들한다(저장소 미포함, 빌드 시 재생성).
+- frozen에서 GGUF 캐시/엔진 경로는 각각 `%LOCALAPPDATA%\VoiceStudio\models\gguf`,
+  `<app>\engine\llama-cuda`다. `VOICE_STUDIO_ENGINE_DIR`로 override 가능.
+- GGUF 백엔드는 CUDA GPU가 없으면 명시적으로 실패한다(CPU fallback 없음, 기존 정책 동일).
+
 ## 릴리스 체크리스트
 1. `pytest -m "not gpu"` 전부 통과
 2. Windows 실기 빌드 + 설치 + 실행 + 생성 E2E (Windows validation pending 관리)

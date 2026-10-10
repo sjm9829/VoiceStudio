@@ -8,3 +8,6 @@ build/
 
 # P17-D: fetched GGUF engine bundle (recreated via scripts/fetch_gguf_engine.py)
 packaging/engine-src/
+
+# dev runtime GGUF engine cache (created on first gguf use)
+src/engine/

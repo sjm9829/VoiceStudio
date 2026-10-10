@@ -306,3 +306,18 @@ def test_spec_includes_engine_bundle_when_present(tmp_path):
     text = src.read_text(encoding="utf-8")
     assert "engine/llama-cuda" in text
     assert "fetch_gguf_engine" in Path("/home/sjm9829/workspace/voice-studio/scripts/build_windows.bat").read_text(encoding="utf-8")
+
+
+def test_download_writes_complete_marker_contract():
+    """download 성공 경로가 .complete 마커를 tmp에 기록해 swap 후에도 유지하는지 정적 검증.
+
+    실패 시나리오 재현이 무거워(네트워크) 소스 계약으로 검증한다.
+    """
+    from pathlib import Path as _P
+    src = _P("src/voice_studio/services/gguf_model_manager.py").read_text(encoding="utf-8")
+    assert '(tmp / ".complete").write_text(' in src
+    # 검증 통과 후 마커 기록 순서(verify -> marker -> swap) 확인
+    i_verify = src.index("broken = _verify_pair(tmp)")
+    i_marker = src.index('(tmp / ".complete").write_text(')
+    i_swap = src.index("tmp.rename(self.cache_dir)")
+    assert i_verify < i_marker < i_swap
