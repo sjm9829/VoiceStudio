@@ -105,50 +105,76 @@ class GgufModelManager:
         except ImportError as exc:
             from ..core.errors import ModelNotDownloadedError
             raise ModelNotDownloadedError("모델 다운로드 라이브러리를 찾을 수 없습니다.") from exc
-        self._disable_hub_console_progress()
         tmp = self.cache_dir.with_name(self.cache_dir.name + ".tmp")
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True)
         try:
             sizes = self._remote_file_sizes()
-            poll_stop = threading.Event()
-            poller = None
-
-            def _poll():
-                base_done = 0
-                while not poll_stop.is_set():
-                    done = base_done
-                    for name in (gguf_cfg.GGUF_MAIN_FILE, gguf_cfg.GGUF_MMPROJ_FILE):
-                        p = tmp / name
-                        if p.exists():
-                            done += p.stat().st_size
-                    if progress_cb is not None and total_bytes > 0:
-                        progress_cb({"stage": "download", "done": min(done, total_bytes),
-                                     "total": total_bytes})
-                    poll_stop.wait(0.5)
-
-            def _dl(name: str, done_before: int) -> None:
-                # 완료된 앞 파일 크기를 합산해 누적 진행 유지(P18-6: model+mmproj 합산).
-                hf_hub_download(
-                    repo_id=gguf_cfg.GGUF_MODEL_REPO,
-                    filename=name,
-                    revision=gguf_cfg.GGUF_MODEL_REVISION,
-                    local_dir=tmp,
-                )
-
             total_bytes = sum(sizes.get(n, 0) for n in (gguf_cfg.GGUF_MAIN_FILE, gguf_cfg.GGUF_MMPROJ_FILE))
-            if progress_cb is not None and total_bytes > 0:
-                poller = threading.Thread(target=_poll, daemon=True)
-                poller.start()
-            for name, done_before in (
-                (gguf_cfg.GGUF_MAIN_FILE, 0),
-                (gguf_cfg.GGUF_MMPROJ_FILE, sizes.get(gguf_cfg.GGUF_MAIN_FILE, 0)),
-            ):
-                _dl(name, done_before)
-            poll_stop.set()
-            if poller is not None:
-                poller.join(timeout=2)
+            done_bytes = 0
+            last_emit = 0.0
+
+            def _emit(force: bool = False) -> None:
+                # P18-F3: 실수신 바이트 기반 진행률(0.5초 스로틀).
+                nonlocal last_emit
+                if progress_cb is None:
+                    return
+                now = time.monotonic()
+                if not force and now - last_emit < 0.5:
+                    return
+                last_emit = now
+                if total_bytes > 0:
+                    progress_cb({"stage": "download", "done": min(done_bytes, total_bytes),
+                                 "total": total_bytes})
+                else:
+                    progress_cb({"stage": "download", "done": done_bytes, "total": 0})
+
+            def _fetch(name: str) -> None:
+                """단일 파일 스트리밍 다운로드(.incomplete 재개 지원). 성공 시 tmp/name 완성."""
+                nonlocal done_bytes
+                from huggingface_hub import hf_hub_url
+                import requests
+                url = hf_hub_url(gguf_cfg.GGUF_MODEL_REPO, filename=name, revision=gguf_cfg.GGUF_MODEL_REVISION)
+                incomplete = tmp / (name + ".incomplete")
+                headers: dict = {}
+                resume = incomplete.stat().st_size if incomplete.exists() else 0
+                if resume > 0:
+                    headers["Range"] = f"bytes={resume}-"
+                expected = sizes.get(name, 0)
+                with requests.get(url, stream=True, timeout=(10, 60), headers=headers,
+                                  allow_redirects=True) as r:
+                    r.raise_for_status()
+                    length = r.headers.get("Content-Length")
+                    # P18-F3: Content-Length/HEAD 부재 시 임의 퍼센트 대신 총량 미지 상태 유지.
+                    if resume > 0 and r.status_code == 200:  # Range 무시 응답: 처음부터
+                        resume = 0
+                    partial = resume > 0 and r.status_code == 206
+                    if not partial:
+                        resume = 0
+                    else:
+                        done_bytes += resume
+                    _emit(force=True)
+                    with open(incomplete, "ab" if partial else "wb") as fh:
+                        for chunk in r.iter_content(chunk_size=1 << 20):
+                            if not chunk:
+                                continue
+                            fh.write(chunk)
+                            done_bytes += len(chunk)
+                            _emit()
+                actual = incomplete.stat().st_size
+                if expected and actual != expected:
+                    raise OfflineError(
+                        f"크기 불일치: {name} {actual}/{expected}",
+                        user_message="모델 파일 받기가 불완전합니다. 다시 시도해 주세요.")
+                incomplete.rename(tmp / name)
+
+            _emit(force=True)
+            for name in (gguf_cfg.GGUF_MAIN_FILE, gguf_cfg.GGUF_MMPROJ_FILE):
+                _fetch(name)
+            _emit(force=True)
+            if progress_cb is not None:
+                progress_cb({"stage": "verify", "done": 0, "total": 0})
             broken = _verify_pair(tmp)
             if broken:
                 raise OfflineError(

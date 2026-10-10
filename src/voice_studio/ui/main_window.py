@@ -741,15 +741,16 @@ class MainWindow(QMainWindow):
     def _on_model_finished(self, ok: bool, err: str):
         if self._dl_thread is None:  # closeEvent 등으로 이미 정리된 경우 무시
             return
-        self._dl_thread.quit()
-        self._dl_thread.wait(2000)
+        th = self._dl_thread
         self._dl_thread = None
+        if th is not None and th is not threading.current_thread() and th.is_alive():
+            th.join(timeout=2.0)
         self._dl_worker = None
         self.progress.setValue(0)
         self.generate_btn.setEnabled(True)
         if ok:
             self._clear_model_retry()
-            self.status_label.setText("")
+            self.status_label.setText("음성 생성 준비 완료")
             callbacks, self._dl_callbacks = self._dl_callbacks, []
             self._dl_done = None
             for cb in callbacks:
@@ -805,29 +806,19 @@ class MainWindow(QMainWindow):
             if callable(terminate):
                 terminate()
                 QTimer.singleShot(3000, self._worker.kill)  # terminate 실패 시 강제 종료
-        # P18-F2: 실행 중 모델 준비 QThread를 안전 종료(파괴 중 running thread 방지).
-        thread = getattr(self, "_dl_thread", None)
-        if thread is not None:
-            self._dl_thread = None
-            self._dl_worker = None
-            worker = self._dl_worker
-            for sig_name in ("progress", "finished"):  # 삭제될 창으로의 시그너스 연결 해제
-                sig = getattr(worker, sig_name, None)
+        # P18-F2: 실행 중 모델 준비 스레드 정리(파괴 중 running thread 방지).
+        th = getattr(self, "_dl_thread", None)
+        if th is not None and th.is_alive():
+            worker = getattr(self, "_dl_worker", None)
+            for sig_name in ("progress", "finished"):
+                sig = getattr(worker, sig_name, None) if worker is not None else None
                 if sig is not None:
                     try:
                         sig.disconnect()
                     except (RuntimeError, TypeError):
                         pass
-            thread.setParent(None)
-            thread.finished.connect(thread.deleteLater)
-            if worker is not None:  # 파이썬/Qt 참조 유지: 실행 중 GC 수거 방지
-                worker.setParent(None)
-                _DETACHED_PREPARE.add(worker)
-                thread.finished.connect(lambda w=worker: _DETACHED_PREPARE.discard(w))
-            else:
-                _DETACHED_PREPARE.add(thread)
-                thread.finished.connect(lambda th=thread: _DETACHED_PREPARE.discard(th))
-            thread.quit()
-            thread.wait(2000)
+            th.join(timeout=2.0)
+        self._dl_thread = None
+        self._dl_worker = None
         self._cleanup_job()
         super().closeEvent(event)
