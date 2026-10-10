@@ -5,3 +5,6 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
+
+# P17-D: fetched GGUF engine bundle (recreated via scripts/fetch_gguf_engine.py)
+packaging/engine-src/

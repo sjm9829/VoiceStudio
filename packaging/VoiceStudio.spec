@@ -74,6 +74,14 @@ if ffmpeg_src.is_dir():
         f = ffmpeg_src / exe_name
         if f.is_file():
             datas.append((str(f), "bin"))
+# P17-C/D: GGUF 음성 엔진(llama.cpp b11540 CUDA, scripts/fetch_gguf_engine.py 준비물).
+# frozen에서 gguf_engine_dir()는 <app>/engine/llama-cuda를 참조한다.
+engine_src = ROOT / "packaging" / "engine-src" / "llama-cuda"
+if engine_src.is_dir():
+    for f in sorted(engine_src.rglob("*")):
+        if f.is_file():
+            rel = f.relative_to(engine_src).as_posix()
+            datas.append((str(f), f"engine/llama-cuda/{Path(rel).parent.as_posix()}"))
 # 라이선스 고지(FFMPEG_NOTICE.txt)도 함께 배포한다.
 notice = ROOT / "third_party" / "FFMPEG_NOTICE.txt"
 if notice.is_file():

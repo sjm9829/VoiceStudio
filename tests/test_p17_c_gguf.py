@@ -284,3 +284,25 @@ def test_settings_dialog_default_manager_official(qtbot, tmp_path):
     dlg._save_and_close()
     assert ctx.settings["tts_backend"] == "official"
     assert isinstance(ctx.model_manager, ModelManager)
+
+
+# ---- P17-D: packaging 계약(GGUF 엔진 번들 경로) ----
+
+def test_paths_engine_dir_contract(monkeypatch, tmp_path):
+    """frozen/dev 어디서든 gguf_engine_dir는 VOICE_STUDIO_ENGINE_DIR override를 우선한다."""
+    from voice_studio.core import paths
+    monkeypatch.setenv("VOICE_STUDIO_ENGINE_DIR", str(tmp_path / "eng"))
+    assert paths.gguf_engine_dir() == Path(tmp_path / "eng")
+    monkeypatch.delenv("VOICE_STUDIO_ENGINE_DIR")
+    d = paths.gguf_engine_dir()
+    assert d.name == "llama-cuda" and d.parent.name == "engine"
+
+
+def test_spec_includes_engine_bundle_when_present(tmp_path):
+    """engine-src 준비 시 spec이 engine/llama-cuda로 datas에 넣는지 정적 검증."""
+    src = Path("/home/sjm9829/workspace/voice-studio/packaging/VoiceStudio.spec")
+    if not src.is_file():
+        pytest.skip("spec not found")
+    text = src.read_text(encoding="utf-8")
+    assert "engine/llama-cuda" in text
+    assert "fetch_gguf_engine" in Path("/home/sjm9829/workspace/voice-studio/scripts/build_windows.bat").read_text(encoding="utf-8")

@@ -8,6 +8,10 @@ REM CUDA_TAG can be overridden at build time; default is the current recommended
 REM cu126 (torch CUDA wheel supports RTX 2070 SUPER / CC 7.5).
 if "%CUDA_TAG%"=="" set CUDA_TAG=cu126
 
+REM P17-C/D: GGUF engine (llama.cpp b11540 CUDA 12.4) bundle prerequisite.
+REM Fetched from the pinned release only; skipped silently when already prepared.
+python scripts\fetch_gguf_engine.py || goto :err
+
 REM FFmpeg build prerequisite (P13): binaries are not committed to the repository.
 REM Prepare them automatically from a fixed LGPL release (no manual download and
 REM no system PATH dependency), then verify license/buildconf (P12.3-04).
