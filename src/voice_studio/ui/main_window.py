@@ -344,7 +344,8 @@ class MainWindow(QMainWindow):
             job_id=job_id, profile_uuid=profile_uuid, segments=segments, gap_flags=gap_flags,
             profile_dir=str(self.context.profile_repository.root), output_path=output_path,
             bitrate_kbps=int(self.context.settings.get("mp3_bitrate_kbps", 192)),
-            model_path=self.context.model_manager.model_path())
+            model_path=self.context.model_manager.model_path(),
+            tts_backend=str(self.context.settings.get("tts_backend", "official")))
 
     def _release_job_slot(self):
         """자신이 acquire한 GPU worker slot만 반납한다(P12.3 Final Hotfix)."""

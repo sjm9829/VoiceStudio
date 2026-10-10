@@ -21,6 +21,19 @@ from .core.job_coordinator import JobCoordinator
 class AppContext:
     """의존성 조립. 무거운 모델 의존성은 worker/서비스 내부에서 지연 import된다."""
 
+    @staticmethod
+    def _make_model_manager(settings: dict):
+        """settings['tts_backend']에 따라 음성 모델 관리자를 선택한다(P17-C).
+
+        - "gguf": Qwen3-TTS 1.7B Q8_0 GGUF + llama.cpp 엔진 관리자.
+        - 기본("official"): 기존 0.6B HF 스냅샷 관리자(변경 없음).
+        """
+        from .services.gguf_model_manager import GgufModelManager
+        backend = (settings or {}).get("tts_backend", "official")
+        if backend == "gguf":
+            return GgufModelManager()
+        return ModelManager()
+
     def save_settings(self, data: dict) -> None:
         """설정을 저장하고 self.settings를 최신 값으로 갱신한다(P12.2-01)."""
         self.settings_repo.save(data)
@@ -33,7 +46,7 @@ class AppContext:
         self.settings = self.settings_repo.load()
         self.profile_repository = ProfileRepository()
         self.audio = AudioService()  # 어댑터 미지정 시 첫 사용에 실제 ffmpeg 탐색
-        self.model_manager = ModelManager()
+        self.model_manager = self._make_model_manager(self.settings)
         self.transcriber = FasterWhisperTranscriber()  # 실제 구현, cpu/int8 지연 로드
         self.profile_service = ProfileService(self.profile_repository, self.audio)
         self.jobs = JobCoordinator()  # 동시 worker 1개 제한(P12.3-25)
@@ -51,7 +64,7 @@ def dev_context(fake_audio=None):
     ctx.audio = AudioService(adapter)
     ctx.profile_repository = ProfileRepository()
     ctx.profile_service = ProfileService(ctx.profile_repository, ctx.audio, FakeQwenAdapter())
-    ctx.model_manager = ModelManager()
+    ctx.model_manager = AppContext._make_model_manager(ctx.settings)
     ctx.transcriber = FakeTranscriber()
     ctx.jobs = JobCoordinator()
     return ctx

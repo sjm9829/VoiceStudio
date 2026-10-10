@@ -23,6 +23,22 @@ def app_data_dir() -> Path:
         base = str(Path.home() / ".local" / "state")
     return Path(base) / APP_DIR_NAME
 
+def gguf_models_dir() -> Path:
+    """GGUF TTS 모델 캐시(models/gguf/<repo>). 설치본 실행 파일 내부에 넣지 않는다(P17-C)."""
+    return app_data_dir() / "models" / "gguf"
+
+def engines_dir() -> Path:
+    """번들된 외부 엔진(llama.cpp 등) 배치 경로. frozen 설치본의 app dir 하위 engine/."""
+    base = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2]
+    return base / "engine"
+
+def gguf_engine_dir() -> Path:
+    """GGUF 실행 엔진(llama-tts) 설치 경로. dev: VOICE_STUDIO_ENGINE_DIR override 우선(P17-C)."""
+    override = os.environ.get("VOICE_STUDIO_ENGINE_DIR")
+    if override:
+        return Path(override)
+    return engines_dir() / "llama-cuda"
+
 def profiles_dir() -> Path:
     return app_data_dir() / "profiles"
 

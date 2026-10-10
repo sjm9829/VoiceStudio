@@ -76,6 +76,17 @@ class SettingsDialog(QDialog):
 
         model_group = QGroupBox("음성 모델")
         model_layout = QVBoxLayout(model_group)
+        backend_row = QHBoxLayout()
+        backend_row.addWidget(QLabel("음성 엔진"))
+        self.backend_combo = QComboBox()
+        self.backend_combo.addItem("기본 (공식 Qwen3-TTS 0.6B)", "official")
+        self.backend_combo.addItem("고정 GGUF 실험판 (1.7B Q8_0, llama.cpp)", "gguf")
+        saved_backend = str(context.settings.get("tts_backend", "official"))
+        idx_b = self.backend_combo.findData(saved_backend)
+        self.backend_combo.setCurrentIndex(idx_b if idx_b >= 0 else 0)
+        self.backend_combo.currentIndexChanged.connect(self._backend_changed)
+        backend_row.addWidget(self.backend_combo, 1)
+        model_layout.addLayout(backend_row)
         self.model_label = QLabel(context.model_manager.status_text())
         model_layout.addWidget(self.model_label)
         dl = QPushButton("모델 받기")
@@ -130,6 +141,17 @@ class SettingsDialog(QDialog):
         self.gpu_label.setText("\n".join(lines))
 
 
+    def _current_manager(self):
+        """콤보 선택에 맞는 모델 관리자 인스턴스(저장 전 미리보기용)."""
+        from ..services.gguf_model_manager import GgufModelManager
+        if self.backend_combo.currentData() == "gguf":
+            return GgufModelManager()
+        return ModelManager()
+
+    def _backend_changed(self, *_):
+        """백엔드 전환 시 상태 표시만 갱신한다. 실제 적용은 저장(close) 시 확정한다."""
+        self.model_label.setText(self._current_manager().status_text())
+
     def _select_saved_quality(self):
         saved = self.context.settings.get("mp3_bitrate_kbps", 192)
         index = self.quality.findData(int(saved))
@@ -172,5 +194,13 @@ class SettingsDialog(QDialog):
             **self.context.settings,
             "mp3_output_dir": self.dir_edit.text(),
             "mp3_bitrate_kbps": self.quality.currentData(),
+            "tts_backend": str(self.backend_combo.currentData()),
         })
+        # 백엔드 변경을 즉시 반영해 이후 생성 job이 새 백엔드로 진행되게 한다(P17-C).
+        from ..services.gguf_model_manager import GgufModelManager
+        backend = self.context.settings.get("tts_backend", "official")
+        if backend == "gguf" and not isinstance(self.context.model_manager, GgufModelManager):
+            self.context.model_manager = GgufModelManager()
+        elif backend != "gguf" and isinstance(self.context.model_manager, GgufModelManager):
+            self.context.model_manager = ModelManager()
         self.accept()

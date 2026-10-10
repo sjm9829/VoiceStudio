@@ -20,6 +20,9 @@ class JobSchemaError(Exception):
         self.detail = detail
 
 COMMON_FIELDS = ("job_id", "mode", "profile_uuid", "profile_dir", "model_path")
+# P17-C: tts_backend은 optional("official" 기본). gguf면 GGUF 백엔드로 worker가 분기한다.
+BACKEND_OFFICIAL = "official"
+BACKEND_GGUF = "gguf"
 NARRATE_FIELDS = ("segments", "gap_flags", "bitrate_kbps", "output_path")
 REGISTER_FIELDS = ("name", "source_path", "start_s", "end_s", "ref_text")
 
@@ -30,6 +33,7 @@ class BaseJob:
     profile_uuid: str
     profile_dir: str
     model_path: str
+    tts_backend: str = BACKEND_OFFICIAL
     schema_version: int = JOB_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -77,6 +81,11 @@ def parse_job(data: dict) -> NarrateJob | RegisterJob:
             base_kwargs[key] = ""  # 등록 job: uuid는 worker가 새로 만든다
         else:
             base_kwargs[key] = _require(data, key, (str,), mode)
+    backend = data.get("tts_backend", BACKEND_OFFICIAL)
+    if backend not in (BACKEND_OFFICIAL, BACKEND_GGUF):
+        raise JobSchemaError("E_JOB_BAD_VALUE", "음성 백엔드 값이 올바르지 않습니다.",
+                             f"tts_backend={backend}")
+    base_kwargs["tts_backend"] = backend
     base_kwargs["mode"] = mode
     if mode == "narrate":
         segments = _require(data, "segments", (list,), mode)
@@ -102,21 +111,24 @@ def parse_job(data: dict) -> NarrateJob | RegisterJob:
 
 def build_narrate_payload(*, job_id: str, profile_uuid: str, profile_dir: str, model_path: str,
                           segments: list[str], gap_flags: list[bool], bitrate_kbps: int,
-                          output_path: str) -> dict[str, Any]:
+                          output_path: str, tts_backend: str = BACKEND_OFFICIAL) -> dict[str, Any]:
     """메인 프로세스가 worker에 넘기는 narrate job을 완성한다."""
     return {"schema_version": JOB_SCHEMA_VERSION, "job_id": job_id, "mode": "narrate",
             "profile_uuid": profile_uuid, "profile_dir": profile_dir, "model_path": model_path,
+            "tts_backend": tts_backend,
             "segments": list(segments), "gap_flags": list(gap_flags),
             "bitrate_kbps": int(bitrate_kbps), "output_path": output_path}
 
 def build_register_payload(*, job_id: str, profile_dir: str, model_path: str,
                            name: str, source_path: str, start_s: float, end_s: float,
-                           ref_text: str, profile_uuid: str = "") -> dict[str, Any]:
+                           ref_text: str, profile_uuid: str = "",
+                           tts_backend: str = BACKEND_OFFICIAL) -> dict[str, Any]:
     """메인 프로세스가 worker에 넘기는 register job을 완성한다.
 
     profile_uuid는 등록 전에는 없으므로 생략한다(worker가 새 uuid를 만들어 저장).
     """
     return {"schema_version": JOB_SCHEMA_VERSION, "job_id": job_id, "mode": "register",
             "profile_uuid": profile_uuid, "profile_dir": profile_dir, "model_path": model_path,
+            "tts_backend": tts_backend,
             "name": name, "source_path": source_path, "start_s": float(start_s),
             "end_s": float(end_s), "ref_text": ref_text}

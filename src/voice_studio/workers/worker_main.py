@@ -62,6 +62,26 @@ def _require_model_path(job) -> str:
     return path
 
 
+def _gguf_adapter(job):
+    """P17-C: GGUF 백엔드 어댑터 구성. 검증된 모델 캐시/엔진이 없으면 명시적으로 실패한다."""
+    from voice_studio.services.gguf_model_manager import GgufModelManager
+    from voice_studio.core.errors import ModelNotDownloadedError
+    import sys as _sys
+    manager = GgufModelManager()
+    model_dir = _require_gguf_model_dir(manager)
+    engine_dir = manager.engine_dir()
+    binary = engine_dir / ("llama-tts.exe" if _sys.platform == "win32" else "llama-tts")
+    if not binary.is_file():
+        raise ModelNotDownloadedError(
+            "GGUF 음성 엔진이 없습니다. 설정에서 음성 엔진을 받은 뒤 다시 시도해 주세요.")
+    from voice_studio.infra.gguf_adapter import GgufQwenAdapter
+    return GgufQwenAdapter(model_dir=model_dir, engine_path=binary)
+
+
+def _require_gguf_model_dir(manager):
+    """GGUF 모델 캐시를 검증해 반환한다. HF 자동 다운로드 fallback은 금지(P12 정책 유지)."""
+    return manager.model_dir()
+
 def _release_gpu() -> None:
     """CUDA context/VRAM을 반환한다(가능한 경우에만)."""
     import gc
@@ -77,10 +97,15 @@ def _release_gpu() -> None:
 
 def run_register(job) -> None:
     emit(status_event("model_loading", job_id=job.job_id))
-    model_path = _require_model_path(job)
+    if getattr(job, "tts_backend", "official") == "gguf":
+        # GGUF 백엔드: 모델 캐시/엔진 경로 기반. 0.6B 스냅샷 경로는 요구하지 않는다.
+        qwen = _gguf_adapter(job)
+    else:
+        model_path = _require_model_path(job)
     repo, audio, service = _make_services(job.profile_dir)
-    from voice_studio.infra.qwen_adapter import RealQwenAdapter, production_device
-    qwen = RealQwenAdapter(model_path=model_path, device=production_device())
+    if getattr(job, "tts_backend", "official") != "gguf":
+        from voice_studio.infra.qwen_adapter import RealQwenAdapter, production_device
+        qwen = RealQwenAdapter(model_path=model_path, device=production_device())
     emit(status_event("analyzing_reference", job_id=job.job_id))
     pcm = audio.decode_reference_segment(job.source_path, job.start_s, job.end_s)
     spec = qwen.create_prompt(pcm, 24000, job.ref_text.strip())
@@ -94,13 +119,18 @@ def run_register(job) -> None:
 
 
 def run_narrate(job) -> None:
-    model_path = _require_model_path(job)  # P12.3-09: narrate도 HF fallback 금지
     emit(status_event("model_loading", job_id=job.job_id))
+    gguf_mode = getattr(job, "tts_backend", "official") == "gguf"
+    if gguf_mode:
+        qwen = _gguf_adapter(job)
+    else:
+        model_path = _require_model_path(job)  # P12.3-09: narrate도 HF fallback 금지
     repo, audio, service = _make_services(job.profile_dir)
-    from voice_studio.infra.qwen_adapter import RealQwenAdapter, production_device
+    if not gguf_mode:
+        from voice_studio.infra.qwen_adapter import RealQwenAdapter, production_device
+        qwen = RealQwenAdapter(model_path=model_path, device=production_device())
     from voice_studio.services.narration_service import NarrationService
     from voice_studio.domain.generation_job import GenerationJob, JobStatus
-    qwen = RealQwenAdapter(model_path=model_path, device=production_device())
     narration = NarrationService(qwen, audio, repo)
     # 모델을 이 프로세스에서 1회 로드한 뒤, 전달받은 segments를 순차 생성한다.
     gen_job = GenerationJob(
@@ -108,6 +138,15 @@ def run_narrate(job) -> None:
         status=JobStatus.PENDING, segments=list(job.segments), gap_flags=list(job.gap_flags),
         failed_chunks=[], output_path=None)
     prompt = service.load_prompt_spec(job.profile_uuid)
+    if gguf_mode:
+        # GGUF 백엔드: 프로필 reference.flac을 job 임시 wav로 재인코딩해 speaker로 사용한다.
+        # 기존 ref_code/ref_spk_embedding 텐서는 0.6B 전용이므로 재사용하지 않는다(원문 지시).
+        from voice_studio.core.paths import safe_job_cache_dir
+        from voice_studio.infra.gguf_adapter import write_pcm16_wav
+        ref_pcm = repo.load_reference_pcm(job.profile_uuid, 24000)
+        speaker_wav = safe_job_cache_dir(job.job_id) / "reference_24k.wav"
+        write_pcm16_wav(speaker_wav, ref_pcm, 24000)
+        prompt = qwen.prepare_speaker(prompt, speaker_wav)
     emit(status_event("generating", job_id=job.job_id, total=len(job.segments)))
     # P15: VOICE_STUDIO_DIAGNOSTICS_DIR 환경 변수를 명시한 경우에만 진단 파일을 남긴다.
     # VOICE_STUDIO_TTS_LANGUAGE로 공식 language 인자를 옵트인한다(기본 None = Auto 유지).
