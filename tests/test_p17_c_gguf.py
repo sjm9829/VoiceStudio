@@ -548,3 +548,57 @@ def test_generate_missing_output_raises(tmp_path):
     spec = ada.prepare_speaker(spec, speaker)
     with pytest.raises(WorkerError):
         ada.generate(spec, "안녕", 24000, workdir=tmp_path)
+
+
+def test_trim_edge_silence_removes_model_lead_and_tail():
+    """P18-3: llama-tts가 임의로 포함하는 앞뒤 무음을 정리한다(무음 '추가'가 아닌 제거)."""
+    import numpy as np
+    from voice_studio.infra.gguf_adapter import _trim_edge_silence
+    sr = 24000
+    lead = np.zeros(int(0.5 * sr), dtype=np.float32)
+    body = (0.3 * np.sin(np.linspace(0, 40, int(1.0 * sr)))).astype(np.float32)
+    tail = np.zeros(int(0.8 * sr), dtype=np.float32)
+    out = _trim_edge_silence(np.concatenate([lead, body, tail]), sr)
+    # 120ms keep margin both sides
+    assert abs(len(out) / sr - (1.0 + 0.24)) < 0.02
+    # content preserved: max location within kept body
+    assert float(np.abs(out).max()) == pytest.approx(0.3, abs=0.05)
+
+
+def test_trim_edge_silence_keeps_quiet_speech():
+    """피크가 작은 take도 상대 임계값으로 정리된다."""
+    import numpy as np
+    from voice_studio.infra.gguf_adapter import _trim_edge_silence
+    sr = 24000
+    pcm = np.concatenate([np.zeros(8000, np.float32), 0.04 * np.ones(48000, np.float32), np.zeros(9000, np.float32)])
+    out = _trim_edge_silence(pcm, sr)
+    assert len(out) < len(pcm)
+    assert len(out) > 48000  # body intact plus margins
+
+
+def test_generate_trims_edge_silence_of_engine_output(tmp_path):
+    """어댑터가 엔진 wav의 앞뒤 무음을 제거한 pcm을 반환한다."""
+    import wave as _w
+    import numpy as np
+    sr = 24000
+    lead = np.zeros(int(0.5 * sr), dtype=np.int16)
+    body = (0.4 * np.sin(np.linspace(0, 30, int(0.8 * sr))) * 32767).astype("<i2")
+    tail = np.zeros(int(0.6 * sr), dtype=np.int16)
+
+    def fake_run(cmd):
+        out = cmd[cmd.index("--output") + 1]
+        with _w.open(str(out), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+            w.writeframes(np.concatenate([lead, body, tail]).tobytes())
+        class R:
+            returncode = 0
+        return R()
+
+    ada = _adapter(tmp_path, runner=fake_run)
+    spec = ada.create_prompt(np.zeros(4, dtype=np.float32), 24000, "대사")
+    speaker = tmp_path / "spk.wav"
+    write_pcm16_wav(speaker, np.zeros(100, dtype=np.float32), 24000)
+    spec = ada.prepare_speaker(spec, speaker)
+    pcm = ada.generate(spec, "안녕", 24000, workdir=tmp_path)
+    assert len(pcm) / 24000 < 0.8 + 0.3  # lead/tail removed
+    assert 0.3 < float(np.abs(pcm).max()) < 0.6

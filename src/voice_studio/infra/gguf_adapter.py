@@ -63,6 +63,25 @@ def _wav_to_pcm16(path: str | Path) -> tuple[np.ndarray, int]:
     return data.astype(np.float32), int(sr)
 
 
+def _trim_edge_silence(pcm: np.ndarray, sample_rate: int, *,
+                       keep_s: float = 0.12, rel: float = 0.05, floor: float = 0.004) -> np.ndarray:
+    """P18-3: 생성 결과 앞뒤 무음을 정리한다(원인: 모델이 리드/테일 무음을 임의로 포함).
+
+    무음을 '추가'하는 것이 아니라 제거하는 동작이다. 임계값은 피크 기준 상대값.
+    """
+    if pcm.size == 0:
+        return pcm
+    peak = float(np.abs(pcm).max())
+    th = max(floor, peak * rel)
+    idx = np.where(np.abs(pcm) > th)[0]
+    if idx.size == 0:
+        return pcm
+    keep = int(keep_s * sample_rate)
+    a = max(0, int(idx[0]) - keep)
+    b = min(pcm.size, int(idx[-1]) + 1 + keep)
+    return pcm[a:b]
+
+
 def _resample(wav: np.ndarray, src: int, dst: int) -> np.ndarray:
     if int(src) == int(dst):
         return wav
@@ -172,6 +191,7 @@ class GgufQwenAdapter:
         pcm, src_sr = _wav_to_pcm16(out_wav)
         if pcm.size == 0:
             raise WorkerError("음성 생성 결과가 비어 있습니다.")
+        pcm = _trim_edge_silence(pcm, src_sr)
         try:
             out_wav.unlink()
         except OSError:
