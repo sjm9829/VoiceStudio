@@ -144,7 +144,10 @@ def test_frozen_smoke_fails_without_cuda_dll_on_windows(tmp_path, monkeypatch, c
     _fake_nvidia_smi(monkeypatch, available=False)
     code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test"])
     assert code == 1
-    assert "CUDA 런타임 DLL 없음" in capsys.readouterr().out
+
+    out = capsys.readouterr().out
+    assert "GGUF llama-tts engine: FAIL" in out
+    assert "엔진 DLL 없음" in out
 
 
 def test_frozen_smoke_succeeds_without_gpu(tmp_path, monkeypatch, capsys):

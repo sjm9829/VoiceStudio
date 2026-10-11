@@ -624,16 +624,17 @@ def test_frozen_engine_redownload_targets_user_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(_sys, "_MEIPASS", str(tmp_path / "mei"), raising=False)
     monkeypatch.delenv("VOICE_STUDIO_ENGINE_DIR", raising=False)
     monkeypatch.setenv("VOICE_STUDIO_DATA_DIR", str(tmp_path / "data"))
+    exe_name = "llama-tts.exe" if sys.platform == "win32" else "llama-tts"
     # 사용자 엔진이 이미 있으면 우선
     user_exe = paths.app_data_dir() / "engines" / "llama-cuda"
     user_exe.mkdir(parents=True, exist_ok=True)
-    (user_exe / "llama-tts").write_bytes(b"x")
+    (user_exe / exe_name).write_bytes(b"x")
     assert paths.gguf_engine_dir() == user_exe
     # 번들만 있으면 번들
-    (user_exe / "llama-tts").unlink()
+    (user_exe / exe_name).unlink()
     bundled = tmp_path / "mei" / "engine" / "llama-cuda"
     bundled.mkdir(parents=True, exist_ok=True)
-    (bundled / "llama-tts").write_bytes(b"x")
+    (bundled / exe_name).write_bytes(b"x")
     assert paths.gguf_engine_dir() == bundled
     # 둘 다 없으면 쓰기 가능한 사용자 경로
     import shutil as _sh; _sh.rmtree(bundled)

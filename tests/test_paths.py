@@ -80,9 +80,10 @@ def test_engines_dir_frozen_uses_meipass(monkeypatch, tmp_path):
     # P18-F8: frozen gguf_engine_dir은 사용자 엔진이 없고 번들 binary도 없으면
     # 쓰기 가능한 사용자 경로(재다운로드 대상)를 반환한다.
     monkeypatch.setenv("VOICE_STUDIO_DATA_DIR", str(tmp_path / "data"))
+    exe_name = "llama-tts.exe" if sys.platform == "win32" else "llama-tts"
     bundled = meipass / "engine" / "llama-cuda"
-    (bundled / "llama-tts").parent.mkdir(parents=True, exist_ok=True)
-    (bundled / "llama-tts").write_bytes(b"x")
+    (bundled / exe_name).parent.mkdir(parents=True, exist_ok=True)
+    (bundled / exe_name).write_bytes(b"x")
     assert vp.gguf_engine_dir() == bundled
 
 
