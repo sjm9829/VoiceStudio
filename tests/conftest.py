@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import pytest
+import os
 from voice_studio.infra.ffmpeg_adapter import FakeFfmpegAdapter
 from voice_studio.infra.profile_repository import ProfileRepository
 from voice_studio.infra.qwen_adapter import FakeQwenAdapter
@@ -36,3 +37,25 @@ def _isolated_app_data(tmp_path, monkeypatch):
     override/unset 상황을 재정의하므로 이 fixture와 충돌하지 않는다.
     """
     monkeypatch.setenv("VOICE_STUDIO_DATA_DIR", str(tmp_path / "appdata"))
+
+
+@pytest.fixture(autouse=True)
+def _fail_unexpected_headless_message_boxes(monkeypatch):
+    """Unexpected modal dialogs must fail, rather than wait forever in CI.
+
+    Tests expecting a dialog should explicitly patch and assert its contents.
+    This also keeps a failed assertion's QWidget cleanup from opening a modal.
+    """
+    if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+        return
+    try:
+        from PySide6.QtWidgets import QMessageBox
+    except ImportError:
+        return
+
+    def unexpected(*args, **kwargs):
+        text = args[2] if len(args) > 2 else ""
+        raise AssertionError(f"Unexpected headless QMessageBox: {text}")
+
+    for method in ("information", "warning", "critical", "question"):
+        monkeypatch.setattr(QMessageBox, method, unexpected)

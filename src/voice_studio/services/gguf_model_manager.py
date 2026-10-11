@@ -452,68 +452,70 @@ class GgufModelManager:
         """llama.cpp 고정 release b11540의 Windows CUDA zip 2종을 받아 풀어 검증한다.
 
         성공 조건: engine_dir/llama-tts(.exe) 존재. 실패 시 기존 engine dir을 훼손하지 않는다.
+        P18-G2: staging(.tmp) 생성/삭제/교체 모두 잠금 획득 후에만 수행한다.
+        잠금 파일은 교체(rename)되지 않는 형제 경로에 둔다.
         """
-        import zipfile
-        import urllib.request
         engine = self.engine_dir()
         binary = self.engine_binary()
         marker = engine / ".complete"
         if marker.is_file() and binary.is_file() and not force:
             return engine
         base = f"https://github.com/ggml-org/llama.cpp/releases/download/{gguf_cfg.LLAMA_RELEASE_TAG}"
-        tmp = engine.with_name(engine.name + ".tmp")
-        if tmp.exists():
-            shutil.rmtree(tmp, ignore_errors=True)
-        tmp.mkdir(parents=True)
-        # P18-G: 엔진 staging도 프로세스 간 배타 잠금으로 보호한다.
-        lock_ctx = _FileLock(engine.with_name(engine.name + ".download.lock"))
-        lock_ctx.__enter__()
-        try:
-            if marker.is_file() and self.engine_binary().is_file():
-                return engine  # 선행 프로세스가 완료한 엔진 재사용(P18-G)
-            for name in (gguf_cfg.LLAMA_WIN_CUDA_ASSET, gguf_cfg.LLAMA_CUDART_ASSET):
-                if progress_cb is not None:
-                    progress_cb({"stage": "engine", "file": name})
-                dest = tmp / name
-                self._download_file(f"{base}/{name}", dest,
-                                    progress=progress_cb, label=name)
-                with zipfile.ZipFile(dest) as zf:
-                    zf.extractall(tmp / "unpacked")
-                dest.unlink()
-            binaries = sorted((tmp / "unpacked").glob("llama-tts*"))
-            exe = next((p for p in binaries if p.is_file()), None)
-            if exe is None:
-                raise OfflineError("llama-tts 실행 파일을 zip에서 찾지 못했습니다.",
-                                   user_message="음성 엔진 설치에 실패했습니다. 다시 시도해 주세요.")
-            # unpacked 내용을 engine dir로 이동
-            for item in (tmp / "unpacked").iterdir():
-                shutil.move(str(item), str(tmp / item.name))
-            (tmp / "unpacked").rmdir()
-            (tmp / ".complete").write_text(gguf_cfg.LLAMA_RELEASE_TAG)
-            # atomic swap
-            old = engine.with_name(engine.name + ".old")
-            if old.exists():
-                shutil.rmtree(old, ignore_errors=True)
-            if engine.exists():
-                engine.rename(old)
-            tmp.rename(engine)
-            if old.exists():
-                shutil.rmtree(old, ignore_errors=True)
-            if not self.engine_binary().is_file():
-                raise OfflineError("엔진 실행 파일이 예상 경로에 없습니다.")
-            return engine
-        except OfflineError:
-            raise
-        except Exception as exc:
-            _logger.warning("GGUF 엔진 다운로드 실패: %s", exc, exc_info=True)
-            shutil.rmtree(tmp, ignore_errors=True)
+        with _FileLock(engine.with_name(engine.name + ".download.lock")):
+            # 잠금 후 선행 프로세스 완료 재검사: 성공 시 재다운로드 없이 재사용(P18-G).
             if marker.is_file() and self.engine_binary().is_file():
                 return engine
-            from ..core.errors import ModelNotDownloadedError
-            raise ModelNotDownloadedError(
-                "음성 엔진을 받지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.") from exc
-        finally:
-            lock_ctx.__exit__()
+            tmp = engine.with_name(engine.name + ".tmp")
+            if tmp.exists():
+                shutil.rmtree(tmp, ignore_errors=True)
+            tmp.mkdir(parents=True)
+            try:
+                self._download_engine_inner(tmp, engine, base, progress_cb)
+            except OfflineError:
+                raise
+            except Exception as exc:
+                _logger.warning("GGUF 엔진 다운로드 실패: %s", exc, exc_info=True)
+                shutil.rmtree(tmp, ignore_errors=True)
+                if marker.is_file() and self.engine_binary().is_file():
+                    return engine
+                from ..core.errors import ModelNotDownloadedError
+                raise ModelNotDownloadedError(
+                    "음성 엔진을 받지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.") from exc
+        return engine
+
+    def _download_engine_inner(self, tmp: Path, engine: Path, base: str, progress_cb=None) -> None:
+        """잠금 보유 하의 실제 수신/검증/atomic swap. 성공 시 정규화된 engine 확정."""
+        import zipfile
+        for name in (gguf_cfg.LLAMA_WIN_CUDA_ASSET, gguf_cfg.LLAMA_CUDART_ASSET):
+            if progress_cb is not None:
+                progress_cb({"stage": "engine", "file": name})
+            dest = tmp / name
+            self._download_file(f"{base}/{name}", dest,
+                                progress=progress_cb, label=name)
+            with zipfile.ZipFile(dest) as zf:
+                zf.extractall(tmp / "unpacked")
+            dest.unlink()
+        binaries = sorted((tmp / "unpacked").glob("llama-tts*"))
+        exe = next((p for p in binaries if p.is_file()), None)
+        if exe is None:
+            raise OfflineError("llama-tts 실행 파일을 zip에서 찾지 못했습니다.",
+                               user_message="음성 엔진 설치에 실패했습니다. 다시 시도해 주세요.")
+        # unpacked 내용을 engine dir로 이동
+        for item in (tmp / "unpacked").iterdir():
+            shutil.move(str(item), str(tmp / item.name))
+        (tmp / "unpacked").rmdir()
+        (tmp / ".complete").write_text(gguf_cfg.LLAMA_RELEASE_TAG)
+        # atomic swap: 기존 engine은 .old로 옮겼다가 성공 확인 후 정리한다.
+        old = engine.with_name(engine.name + ".old")
+        if old.exists():
+            shutil.rmtree(old, ignore_errors=True)
+        if engine.exists():
+            engine.rename(old)
+        tmp.rename(engine)
+        if old.exists():
+            shutil.rmtree(old, ignore_errors=True)
+        if not self.engine_binary().is_file():
+            raise OfflineError("엔진 실행 파일이 예상 경로에 없습니다.")
 
     @staticmethod
     def _download_file(url: str, dest: Path, progress=None, label: str = "") -> None:

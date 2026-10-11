@@ -49,6 +49,40 @@ PHASE_KO = {
 
 _DETACHED_PREPARE: set = set()  # 닫힌 창의 준비 스레드가 끝날 때까지 참조 유지(GC 방지)
 
+class ModelVerifyWorker(QObject):
+    """P18-G2: 이미 준비된 모델/엔진의 무결성 검증만 백그라운드로 수행.
+
+    UI 스레드에서 수 GB SHA-256을 계산하지 않도록 note_verified 서명을
+    백그라운드에서 확정한다. 다운로드는 시도하지 않는다.
+    """
+
+    progress = Signal(dict)
+    finished = Signal(bool, str)
+
+    def __init__(self, model_manager):
+        super().__init__()
+        self._mm = model_manager
+
+    def run(self):
+        try:
+            # 검증: is_downloaded()는 내부적으로 해시 재검증을 수행한다.
+            chk = getattr(self._mm, "is_downloaded", None)
+            if chk is not None and not chk():
+                # 서명 불일치/손상: 재다운로드 없이 실패로 보고한다(사용자 재준비 필요).
+                self.finished.emit(False, "음성 모델 검증에 실패했습니다. 설정에서 다시 받아 주세요.")
+                return
+            note = getattr(self._mm, "note_verified", None)  # P18-G2: 서명 확정
+            if note is not None:
+                note()
+            eng = getattr(self._mm, "is_engine_ready", None)
+            if eng is not None and not eng():
+                self.finished.emit(False, "음성 엔진이 준비되지 않았습니다.")
+                return
+            self.finished.emit(True, "")
+        except Exception as e:  # noqa: BLE001 - UI 표시용 문자열 변환
+            self.finished.emit(False, str(e))
+
+
 class ModelPrepareWorker(QObject):
     """P18-5: 백그라운드에서 모델+엔진 준비. progress(dict), finished(bool,str) 시그널."""
 
@@ -97,8 +131,10 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_voices()
         self._refresh_save_location_label()
-        if not self._model_ready():  # P18-F2: 준비 안 됐을 때만 백그라운드 확인/다운로드
-            self._startup_model_check()
+        # P18-G2: 준비 여부와 무관하게 백그라운드 무결성 검증을 시작한다.
+        # quickly_ready() 통과 시에도 최초 생성 시 UI 스레드 SHA-256 멈춤을 막기 위해
+        # 백그라운드에서 note_verified 서명을 미리 확정해 둔다(다운로드 완료면 생략).
+        self._startup_model_check(verify_only=True)
 
     def _build_ui(self):
         central = QWidget(); self.setCentralWidget(central)
@@ -366,8 +402,16 @@ class MainWindow(QMainWindow):
         self.context.save_settings({**self.context.settings, "mp3_output_dir": chosen})
         self._refresh_save_location_label()
 
-    def _startup_model_check(self):
-        """P18-F2: 앱 시작 시 백그라운드로 모델/엔진 확인·자동 준비. UI는 먼저 표시된다."""
+    def _startup_model_check(self, verify_only: bool = False):
+        """P18-F2: 앱 시작 시 백그라운드로 모델/엔진 확인·자동 준비. UI는 먼저 표시된다.
+
+        P18-G2: verify_only=True이면 이미 준비된 모델의 무결성 검증만 백그라운드로
+        수행해 note_verified 서명을 확정한다(다운로드 재시도 없음).
+        """
+        if verify_only and self._model_ready():
+            QTimer.singleShot(0, lambda: self._ensure_model_async(
+                self._on_startup_model_ready, verify_only=True))
+            return
         QTimer.singleShot(0, lambda: self._ensure_model_async(self._on_startup_model_ready))
 
     def _on_startup_model_ready(self, ok: bool):
@@ -396,8 +440,12 @@ class MainWindow(QMainWindow):
         if not script:
             QMessageBox.information(self, "보이스 스튜디오", "대본을 입력해 주세요.")
             return
-        if not self._model_ready():
-            self._ensure_model_async(lambda ok: self._continue_generation(profile_uuid, script) if ok else None)
+        if not self._model_ready() or not self._verified_signature_valid():
+            # P18-G2: 준비 안 됐거나 검증 서명이 없으면 백그라운드 검증/준비에 합류하고,
+            # 완료 시 입력된 대본/목소리 그대로 단 한 번 생성을 이어서 수행한다.
+            self._ensure_model_async(
+                lambda ok: self._continue_generation(profile_uuid, script) if ok else None,
+                verify_only=self._model_ready())
             return
         try:
             if not self._start_worker(self._build_job(profile_uuid, script)):
@@ -711,6 +759,25 @@ class MainWindow(QMainWindow):
             n += 1
         return cand
 
+    def _verified_signature_valid(self) -> bool:
+        """P18-G2: 백그라운드 검증 서명이 유효한지(UI 스레드 해시 생략 가능) 확인.
+
+        서명이 있으면 저비용 비교만 수행한다. 서명 부재 시 False: verify-only
+        워커가 백그라운드에서 note_verified()를 확정하게 한다.
+        """
+        mm = self.context.model_manager
+        csig = getattr(mm, "_content_signature", None)
+        if csig is None:
+            # 시그니처 메커니즘이 없는 관리자(테스트 스텁 등): 기존 동작 유지.
+            return True
+        sig = getattr(mm, "_verified_sig", None)
+        if sig is None:
+            return False
+        try:
+            return csig() == sig
+        except OSError:
+            return False
+
     def _model_ready(self) -> bool:
         """P18-5: 모델+엔진 준비 여부."""
         mm = self.context.model_manager
@@ -726,19 +793,25 @@ class MainWindow(QMainWindow):
             return False
         return True
 
-    def _ensure_model_async(self, done):
-        """P18-5: 모델/엔진 미준비 시 자동 다운로드(무결성 검증 포함). 실패 시 다시 시도 버튼."""
+    def _ensure_model_async(self, done, verify_only: bool = False):
+        """P18-5: 모델/엔진 미준비 시 자동 다운로드(무결성 검증 포함). 실패 시 다시 시도 버튼.
+
+        P18-G2: verify_only=True이면 이미 준비된 모델의 검증만 수행하는 경량 워커를 쓴다.
+        다운로드가 전혀 필요 없으므로 진행률 대신 검증 상만 표시한다.
+        """
         if self._dl_thread is not None:  # P18-F2: 단일 준비 작업 공유(중복 다운로드 금지)
             self._dl_callbacks.append(done)
             return
         self.generate_btn.setEnabled(False)
-        self.status_label.setText("음성 모델을 준비하는 중...")
+        self.status_label.setText(
+            "음성 모델을 확인하는 중..." if verify_only else "음성 모델을 준비하는 중...")
         mm = self.context.model_manager
-        try:  # P18-F2: 다운로더 모듈을 UI 스레드에서 미리 적재(백그라운드 import 경합 방지)
-            from huggingface_hub import HfApi, hf_hub_download  # noqa: F401
-        except Exception:  # noqa: BLE001 - 오프라인 환경 허용, worker에서 재시도
-            pass
-        worker = ModelPrepareWorker(mm)
+        if not verify_only:
+            try:  # P18-F2: 다운로더 모듈을 UI 스레드에서 미리 적재(백그라운드 import 경합 방지)
+                from huggingface_hub import HfApi, hf_hub_download  # noqa: F401
+            except Exception:  # noqa: BLE001 - 오프라인 환경 허용, worker에서 재시도
+                pass
+        worker = ModelVerifyWorker(mm) if verify_only else ModelPrepareWorker(mm)
         worker.progress.connect(self._on_model_progress)
         worker.finished.connect(self._on_model_finished)
         self._dl_thread = threading.Thread(

@@ -386,8 +386,11 @@ class VoiceEditorDialog(QDialog):
                                         "오디오 파일을 분석하는 중입니다. 완료 후 다시 시도해 주세요.")
                 return
             self._validate_register_inputs()
-            if self._model_ready():
+            if self._verified_signature_valid():
                 self._start_register_worker()
+            elif self._model_ready():
+                # P18-G2: 준비돼도 서명이 없으면 백그라운드 검증 후 등록 계속.
+                self._prepare_then_register(verify_only=True)
             else:
                 self._prepare_then_register()
         except VoiceStudioError as exc:
@@ -396,6 +399,21 @@ class VoiceEditorDialog(QDialog):
         except OSError as exc:
             QMessageBox.warning(self, "보이스 스튜디오", f"작업 파일을 준비할 수 없습니다: {exc}")
 
+
+    def _verified_signature_valid(self) -> bool:
+        """P18-G2: 검증 서명 유효 저비용 확인. UI 스레드 해시 생략 판단."""
+        mm = self.context.model_manager
+        csig = getattr(mm, "_content_signature", None)
+        if csig is None:
+            # 시그니처 메커니즘이 없는 관리자(테스트 스텁 등): 기존 동작 유지.
+            return True
+        sig = getattr(mm, "_verified_sig", None)
+        if sig is None:
+            return False
+        try:
+            return csig() == sig
+        except OSError:
+            return False
 
     def _model_ready(self) -> bool:
         mm = self.context.model_manager
@@ -409,20 +427,23 @@ class VoiceEditorDialog(QDialog):
         eng = getattr(mm, "is_engine_ready", None)
         return dl_ok and (eng is None or eng())
 
-    def _prepare_then_register(self):
+    def _prepare_then_register(self, verify_only: bool = False):
         """P18-F2: 등록 전 모델/엔진 자동 준비. 완료 후 등록을 이어서 수행한다.
 
         UI 스레드 블록 없이 QThread에서 다운로드/해시 검증을 수행하고, 진행률을
         상태 라벨로 표시한다. 실패 시 안내 후 재시도할 수 있다.
+        P18-G2: verify_only=True이면 검증만 수행하는 경량 워커를 쓴다.
         """
-        from .main_window import ModelPrepareWorker
+        from .main_window import ModelPrepareWorker, ModelVerifyWorker
+        worker_cls = ModelVerifyWorker if verify_only else ModelPrepareWorker
         self._prepare_thread = QThread(self)
-        self._prepare_worker = ModelPrepareWorker(self.context.model_manager)
+        self._prepare_worker = worker_cls(self.context.model_manager)
         self._prepare_worker.moveToThread(self._prepare_thread)
         self._prepare_thread.started.connect(self._prepare_worker.run)
         self._prepare_worker.progress.connect(self._on_prepare_progress)
         self._prepare_worker.finished.connect(self._on_prepare_finished)
-        self.status_label.setText("음성 모델을 준비하는 중...")
+        self.status_label.setText(
+            "음성 모델을 확인하는 중..." if verify_only else "음성 모델을 준비하는 중...")
         self._prepare_thread.start()
 
     def _on_prepare_progress(self, payload: dict):

@@ -26,6 +26,11 @@ def test_single_flight_dedupes_concurrent_downloads(tmp_path, monkeypatch):
         (tmp / gguf_cfg.GGUF_MAIN_FILE).write_bytes(b"x" * 10)
         (tmp / (gguf_cfg.GGUF_MAIN_FILE + ".incomplete")).unlink(missing_ok=True)
         (tmp / ".complete").write_text("rev")
+        # 지각 합류자(late caller)도 완료 캐시를 보고 재다운로드하지 않도록
+        # 실제 계약과 동일하게 cache에도 완료 상태를 남긴다.
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        (self.cache_dir / gguf_cfg.GGUF_MAIN_FILE).write_bytes(b"x" * 10)
+        (self.cache_dir / ".complete").write_text("rev")
         return self.cache_dir
 
     monkeypatch.setattr(gmm.GgufModelManager, "_download_inner", fake_inner)
