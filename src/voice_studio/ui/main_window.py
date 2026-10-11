@@ -390,16 +390,9 @@ class MainWindow(QMainWindow):
         if not script:
             QMessageBox.information(self, "보이스 스튜디오", "대본을 입력해 주세요.")
             return
-        self._ensure_model_async(lambda ok: self._continue_generation(profile_uuid, script) if ok else None)
-        return
-        try:
-            if not self._start_worker(self._build_job(profile_uuid, script)):
-                return  # 다른 worker 실행 중(P12.3-25)
-        except VoiceStudioError as e:
-            # 모델 미다운로드/프로필 오류 등 생성 시작 실패를 UI에서 안내(P12.1-07).
-            QMessageBox.warning(self, "보이스 스튜디오", str(e))
-        except OSError as e:
-            QMessageBox.warning(self, "보이스 스튜디오", f"작업 파일을 준비할 수 없습니다: {e}")
+        self._ensure_model_async(
+            lambda ok: self._continue_generation(profile_uuid, script) if ok else None
+        )
 
     def _build_job(self, profile_uuid: str, script: str) -> dict:
         """worker가 요구하는 나레이션 job payload를 완성한다.
