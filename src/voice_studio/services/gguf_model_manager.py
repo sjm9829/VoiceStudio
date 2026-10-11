@@ -105,56 +105,99 @@ _SINGLE_FLIGHT = _SingleFlight()
 
 
 def _pid_alive(pid: int) -> bool:
+    """PID 생존 확인. Windows에서 os.kill(pid, 0)를 쓰지 않는다(P18-G: signal 0은
+    존재하지 않는 권한/경합에서 종료 유발 가능)."""
+    if sys.platform == "win32":
+        import ctypes
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        SYNCHRONIZE = 0x00100000
+        h = k32.OpenProcess(SYNCHRONIZE, False, int(pid))
+        if not h:
+            return False
+        k32.CloseHandle(h)
+        return True
     try:
-        os.kill(pid, 0)
+        os.kill(pid, 0)  # POSIX: signal 0은 확인 전용
         return True
     except OSError:
         return False
 
 
 class _FileLock:
-    """디렉터 단위 best-effort 파일 잠금(O_EXCL). 프로세스 충돌 시 stale을 인계받는다."""
+    """프로세스 간 배타적 잠금(P18-G). OS-native advisory lock만 사용한다.
+
+    - Windows: msvcrt.locking(LK_NBLCK) / POSIX: fcntl.flock(LOCK_EX|LOCK_NB).
+    - 잠금 파일은 대상 디렉터의 형제 경로(교체 rename의 대상이 아닌 안정 위치)에 둔다.
+    - 커널/OS가 홀더 사망 시 잠금을 해제하므로 stale 정리·PID 재사용 판단이 불필요하다.
+    - 획득 실패와 timeout은 정상 사용자 오류로 보고한다. 잠금 없이 진행하는 폴백 금지.
+    """
+
+    TIMEOUT_S = 600.0
 
     def __init__(self, path: Path) -> None:
-        self.path = path
-        self._held = False
+        self.path = Path(path)
+        self._fd: int | None = None
+        self._locked = False
 
     def __enter__(self) -> "_FileLock":
-        deadline = time.monotonic() + 600.0
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + self.TIMEOUT_S
+        last_err: Exception | None = None
         while True:
             try:
-                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                with os.fdopen(fd, "w") as fh:
-                    fh.write(str(os.getpid()))
-                self._held = True
-                return self
-            except FileExistsError:
-                pass
-            except OSError:
-                return self  # 잠금 불가 환경: 잠금 없이 진행(기존 동작)
-            try:
-                pid = int(self.path.read_text().strip() or 0)
-                stale = pid <= 0 or not _pid_alive(pid)
-            except (OSError, ValueError):
-                stale = time.monotonic() > deadline - 540.0
-            if stale:
-                # 홀더 사망: 잠금 정리 후 재시도(1회).
-                try:
-                    self.path.unlink()
+                self._fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR, 0o666)
+                self._lock_fd()
+                self._locked = True
+                try:  # 진단용 홀더 기록(갱신 실패는 무해)
+                    os.ftruncate(self._fd, 0)
+                    os.write(self._fd, str(os.getpid()).encode())
                 except OSError:
                     pass
-                stale = False
-            if time.monotonic() > deadline:
-                return self  # 포기 대신 잠금 없이 진행
-            time.sleep(0.5)
+                return self
+            except OSError as exc:
+                last_err = exc
+                if self._fd is not None:
+                    try:
+                        os.close(self._fd)
+                    except OSError:
+                        pass
+                    self._fd = None
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.25)
+        raise TimeoutError(
+            f"다른 VoiceStudio 프로세스가 파일 잠금을 보유 중입니다: {self.path} ({last_err})")
+
+    def _lock_fd(self) -> None:
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(self._fd, msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+        else:
+            import fcntl
+            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def __exit__(self, *exc) -> None:
-        if self._held:
+        if self._locked and self._fd is not None:
             try:
-                self.path.unlink()
+                if sys.platform == "win32":
+                    import msvcrt
+                    try:
+                        os.lseek(self._fd, 0, os.SEEK_SET)
+                        msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+                    except OSError:
+                        pass
+                else:
+                    import fcntl
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
             except OSError:
                 pass
-        self._held = False
+        self._locked = False
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+        self._fd = None
 
 
 class GgufModelManager:
@@ -198,8 +241,42 @@ class GgufModelManager:
         return "아직 받지 않음 (Qwen3-TTS 1.7B Q8_0)"
 
     def model_path(self) -> str:
-        """UI/job payload용 GGUF 모델 디렉터리 문자열. 없으면 ModelNotDownloadedError."""
-        return str(self.model_dir())
+        """UI/job payload용 GGUF 모델 디렉터리 문자열. 없으면 ModelNotDownloadedError.
+
+        P18-G: UI 스레드 SHA-256 전량 계산 방지 - 마지막 백그라운드 검증 서명
+        (파일 개수+mtime+size)이 유지되는 한 재검증 없이 경로만 반환한다.
+        서명 불일치/부재 시 전체 검증을 수행한다(백그라운드 워커 경로와 동일).
+        """
+        return str(self.verified_model_dir())
+
+    def _content_signature(self) -> tuple | None:
+        try:
+            sig = []
+            for name in (gguf_cfg.GGUF_MAIN_FILE, gguf_cfg.GGUF_MMPROJ_FILE):
+                st = (self.cache_dir / name).stat()
+                sig.append((name, st.st_mtime_ns, st.st_size))
+            return tuple(sig)
+        except OSError:
+            return None
+
+    def note_verified(self) -> None:
+        """백그라운드 검증 성공 후 서명을 기록한다(ModelPrepareWorker 경로)."""
+        self._verified_sig = self._content_signature()
+
+    def verified_model_dir(self) -> Path:
+        """검증된 모델 디렉터. UI 신속 경로: 유효 서명이 있으면 해시 생략."""
+        from ..core.errors import ModelNotDownloadedError
+        if getattr(self, "_verified_sig", None) is not None:
+            if (self.cache_dir / ".complete").is_file() \
+                    and self._content_signature() == self._verified_sig:
+                return self.cache_dir
+            self._verified_sig = None  # 파일 변경/손상: 무효화 후 재검증
+        problems = self.missing_or_broken()
+        if problems:
+            raise ModelNotDownloadedError(
+                "GGUF 음성 모델이 아직 받아지지 않았습니다. 설정에서 받은 뒤 다시 시도해 주세요.")
+        self._verified_sig = self._content_signature()
+        return self.cache_dir
 
     def model_dir(self) -> Path:
         """검증된 모델 디렉터리. 없으면 ModelNotDownloadedError."""
@@ -234,7 +311,11 @@ class GgufModelManager:
         tmp = self.cache_dir.with_name(self.cache_dir.name + ".tmp")
         # P18-F4: 진입 시 tmp를 지우지 않는다. .incomplete/.gguf 조각을 보존해 이어받기.
         tmp.mkdir(parents=True, exist_ok=True)
-        with _FileLock(tmp / ".lock"):
+        # P18-G: 잠금 파일은 교체(rename)되지 않는 형제 경로에 둔다.
+        with _FileLock(self.cache_dir.with_name(self.cache_dir.name + ".download.lock")):
+            # P18-G: 선행 프로세스가 방금 완료했으면 재검증 후 그 결과를 재사용한다.
+            if not force and not self.missing_or_broken():
+                return self.cache_dir
             return self._download_inner(tmp, progress_cb)
 
     def _download_inner(self, tmp: Path, progress_cb=None) -> Path:
@@ -384,7 +465,12 @@ class GgufModelManager:
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True)
+        # P18-G: 엔진 staging도 프로세스 간 배타 잠금으로 보호한다.
+        lock_ctx = _FileLock(engine.with_name(engine.name + ".download.lock"))
+        lock_ctx.__enter__()
         try:
+            if marker.is_file() and self.engine_binary().is_file():
+                return engine  # 선행 프로세스가 완료한 엔진 재사용(P18-G)
             for name in (gguf_cfg.LLAMA_WIN_CUDA_ASSET, gguf_cfg.LLAMA_CUDART_ASSET):
                 if progress_cb is not None:
                     progress_cb({"stage": "engine", "file": name})
@@ -426,6 +512,8 @@ class GgufModelManager:
             from ..core.errors import ModelNotDownloadedError
             raise ModelNotDownloadedError(
                 "음성 엔진을 받지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.") from exc
+        finally:
+            lock_ctx.__exit__()
 
     @staticmethod
     def _download_file(url: str, dest: Path, progress=None, label: str = "") -> None:

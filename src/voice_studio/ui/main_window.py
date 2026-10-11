@@ -28,6 +28,8 @@ from ..core import config
 from ..core.paths import default_mp3_dir
 from ..core.paths import logs_dir
 from ..workers.job_schema import build_narrate_payload
+
+_logger = logging.getLogger(__name__)
 from ..workers.launcher import apply_no_window, worker_command
 from ..core.paths import safe_job_cache_dir
 from ..workers.linebuffer import JsonlBuffer
@@ -63,6 +65,9 @@ class ModelPrepareWorker(QObject):
                 self._mm.download(progress_cb=self.progress.emit)
             if not self._mm.is_engine_ready():
                 self._mm.download_engine(progress_cb=self.progress.emit)
+            note = getattr(self._mm, "note_verified", None)  # P18-G: 검증 서명 기록(UI 재사용)
+            if note is not None:
+                note()
             self.finished.emit(True, "")
         except Exception as e:  # noqa: BLE001 - UI 표시용 문자열 변환
             self.finished.emit(False, str(e))
@@ -645,14 +650,22 @@ class MainWindow(QMainWindow):
         if path is None:
             QMessageBox.warning(self, "보이스 스튜디오", "저장 폴더를 만들 수 없습니다.")
             return
+        tmp_path = Path(str(path) + ".part~")  # P18-G: 같은 dir 임시파일 원자 게시
         try:
-            shutil.copyfile(self._last_output, path)
-        except OSError as e:
-            # P18-F4: 실패 시 빈/부분 MP3를 정리한다(O_EXCL로 새로 만든 파일).
-            try:
-                Path(path).unlink(missing_ok=True)
-            except OSError:
+            with open(tmp_path, "wb") as _t:
                 pass
+            shutil.copyfile(self._last_output, tmp_path)
+            with open(tmp_path, "rb+") as _t:
+                _t.flush()
+                os.fsync(_t.fileno())
+            os.replace(tmp_path, path)  # 예약된 빈 final을 완성본으로 원자 교체
+        except OSError as e:
+            # P18-F4/G: 실패 시 임시/예약 파일만 정리. 기존 사용자 MP3는 훼손 없음.
+            for stray in (tmp_path, Path(path)):
+                try:
+                    stray.unlink(missing_ok=True)
+                except OSError:
+                    pass
             QMessageBox.warning(self, "보이스 스튜디오", f"MP3를 저장하지 못했습니다: {e}")
             return
         # P12.3-18: 캐시 job 폴더를 삭제하고 _last_output을 사용자 파일로 교체.
@@ -681,11 +694,13 @@ class MainWindow(QMainWindow):
 
         def _exclusive(path: Path) -> Path | None:
             try:
-                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)  # 덮어쓰기 없는 생성
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)  # 덮어쓰기 없는 예약
             except FileExistsError:
                 return None
-            except OSError:
-                return path  # excl 미지원 등: 존재 확인 기반 폴백
+            except OSError as exc:
+                # P18-G: O_EXCL 실패 시 기존 path 반환 폴백 금지 - 기존 파일 덮어쓰기 위험.
+                _logger.warning("MP3 예약 실패 %s: %s", path, exc)
+                return None
             os.close(fd)
             return path
 
