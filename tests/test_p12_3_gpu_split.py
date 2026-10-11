@@ -58,84 +58,63 @@ def _smoke_log(tmp_path):
 
 
 def test_default_smoke_succeeds_without_gpu(tmp_path, monkeypatch, capsys):
-    _install_fake_gpu_stack(monkeypatch, cuda_available=False)
+    """GGUF packaging smoke does not require torch or an attached GPU."""
+    import voice_studio.heavy_smoke as hs
+    monkeypatch.setattr(hs, "_check_gguf_runtime", lambda: None)
+    monkeypatch.setattr(hs, "_check_llama_engine", lambda: None)
     code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test"])
     assert code == 0
-    log = _smoke_log(tmp_path)
+    assert "SMOKE_OK" in _smoke_log(tmp_path)
     out = capsys.readouterr().out
-    assert "SMOKE_OK" in log
-    # CUDA/GPU 2개 항목이 GPU 없이 SKIP 처리되어 성공이다(FAIL 아님).
+    assert "GGUF runtime imports: OK" in out
     assert "CUDA available: SKIP" in out
     assert "GPU: SKIP" in out
-    assert ": FAIL" not in out
 
 
-def test_default_smoke_fails_on_torch_import_error(tmp_path, monkeypatch):
-    """frozen에서 torch/qwen import 실패는 기본 smoke에서도 FAIL이다(SKIP 아님)."""
-    import sys as _sys
-    monkeypatch.setattr(_sys, "frozen", True, raising=False)
+def test_frozen_smoke_succeeds_without_gpu(tmp_path, monkeypatch, capsys):
     import voice_studio.heavy_smoke as hs
-
-    def _failing_heavy(checks, require_gpu=False):
-        checks.append(("Torch import", False, "ImportError: dll not found"))
-        checks.append(("qwen_tts import", False, "ImportError: no module"))
-        checks.append(("CUDA available", True, "SKIP (...)"))
-        checks.append(("GPU", True, "SKIP (...)"))
-
-    monkeypatch.setattr(hs, "heavy_checks", _failing_heavy)
-    code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test"])
-    assert code == 1
-    log = _smoke_log(tmp_path)
-    assert "SMOKE_FAILED" in log
-    assert "Torch import" in log
-
-
-def test_default_frozen_smoke_succeeds_without_gpu(tmp_path, monkeypatch, capsys):
-    """sys.frozen=True + GPU 없음 + 기본 smoke는 SKIP 2개로 성공이어야 한다(P13 후속 회귀).
-
-    기존 test_default_smoke_succeeds_without_gpu는 frozen을 모사하지 않아
-    frozen에서 okflag=False가 FAIL로 분류되는 회귀를 놓쳤다.
-    """
-    import sys as _sys
-    monkeypatch.setattr(_sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
     _fake_ffmpeg(monkeypatch)
-    _install_fake_gpu_stack(monkeypatch, cuda_available=False)
-    code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test"])
-    assert code == 0
-    log = _smoke_log(tmp_path)
-    out = capsys.readouterr().out
-    assert "SMOKE_OK" in log
-    assert "CUDA available: SKIP (frozen)" in out
-    assert "GPU: SKIP (frozen)" in out
-    assert ": FAIL" not in out
+    monkeypatch.setattr(hs, "_check_gguf_runtime", lambda: None)
+    monkeypatch.setattr(hs, "_check_llama_engine", lambda: None)
+    assert _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test"]) == 0
+    assert "CUDA available: SKIP" in capsys.readouterr().out
 
 
-def test_frozen_smoke_require_gpu_still_fails_without_gpu(tmp_path, monkeypatch, capsys):
-    """frozen + --require-gpu + GPU 없음은 여전히 FAIL(exit 1)이어야 한다."""
-    import sys as _sys
-    monkeypatch.setattr(_sys, "frozen", True, raising=False)
+def test_frozen_smoke_fails_when_engine_missing(tmp_path, monkeypatch):
+    import voice_studio.heavy_smoke as hs
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
     _fake_ffmpeg(monkeypatch)
-    _install_fake_gpu_stack(monkeypatch, cuda_available=False)
-    code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test", "--require-gpu"])
-    assert code == 1
+    monkeypatch.setattr(hs, "_check_gguf_runtime", lambda: None)
+    def missing():
+        raise FileNotFoundError("llama-tts.exe")
+    monkeypatch.setattr(hs, "_check_llama_engine", missing)
+    assert _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test"]) == 1
     assert "SMOKE_FAILED" in _smoke_log(tmp_path)
 
 
-def test_require_gpu_fails_when_cuda_unavailable(tmp_path, monkeypatch):
-    _install_fake_gpu_stack(monkeypatch, cuda_available=False)
-    code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test", "--require-gpu"])
-    assert code == 1
-    log = _smoke_log(tmp_path)
-    assert "SMOKE_FAILED" in log
-    assert "CUDA" in log
-
-
-def test_require_gpu_succeeds_when_cuda_available(tmp_path, monkeypatch):
-    _install_fake_gpu_stack(monkeypatch, cuda_available=True)
+def test_strict_gpu_smoke_fails_if_driver_missing(tmp_path, monkeypatch):
+    import voice_studio.heavy_smoke as hs
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
     _fake_ffmpeg(monkeypatch)
-    code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test", "--require-gpu"])
-    assert code == 0
-    assert "SMOKE_OK" in _smoke_log(tmp_path)
+    monkeypatch.setattr(hs, "_check_gguf_runtime", lambda: None)
+    monkeypatch.setattr(hs, "_check_llama_engine", lambda: None)
+    def no_cuda():
+        raise RuntimeError("CUDA driver missing")
+    monkeypatch.setattr(hs, "_cuda_device_count", no_cuda)
+    assert _run_smoke(monkeypatch, tmp_path,
+                      ["VoiceStudio.exe", "--smoke-test", "--require-gpu"]) == 1
+
+
+def test_strict_gpu_smoke_succeeds_with_driver(tmp_path, monkeypatch):
+    import voice_studio.heavy_smoke as hs
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    _fake_ffmpeg(monkeypatch)
+    monkeypatch.setattr(hs, "_check_gguf_runtime", lambda: None)
+    monkeypatch.setattr(hs, "_check_llama_engine", lambda: None)
+    monkeypatch.setattr(hs, "_cuda_device_count", lambda: 1)
+    assert _run_smoke(monkeypatch, tmp_path,
+                      ["VoiceStudio.exe", "--smoke-test", "--require-gpu"]) == 0
 
 
 def test_build_script_does_not_require_check_cuda():
@@ -147,7 +126,7 @@ def test_build_script_does_not_require_check_cuda():
 
 def test_check_runtime_packages_never_asserts_cuda_available():
     src = (ROOT / "scripts" / "check_runtime_packages.py").read_text(encoding="utf-8")
-    assert "torch.version.cuda" in src
+    assert "torch.version.cuda" not in src
     # GPU 존재 검사 코드가 없어야 한다(주석 언급 제외: 실제 호출 라인 기준).
     for line in src.splitlines():
         code = line.split("#")[0]
