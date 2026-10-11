@@ -101,8 +101,8 @@ def test_check_runtime_packages_ok_on_clean_env(capsys):
 def test_check_cuda_uses_stable_abi_rule():
     """check_cuda.py must call the same helper (no exact-equality check)."""
     source = (SCRIPTS / "check_cuda.py").read_text(encoding="utf-8")
-    assert "check_torch_torchaudio_compat" in source
-    assert 'split("+")' not in source
+    assert "nvidia-smi" in source  # P18: torch 없이 CUDA driver를 직접 확인
+    assert "import torch" not in source
 
 
 

@@ -9,6 +9,7 @@
 from __future__ import annotations
 import hashlib
 import logging
+import os
 import shutil
 import sys
 import threading
@@ -50,6 +51,112 @@ def _verify_pair(directory: Path) -> list[str]:
     return problems
 
 
+class _SingleFlight:
+    """프로세스 단일 다운로드 조정자(P18-F2).
+
+    서로 다른 창/워커가 동시에 download()를 호출해도 실제 네트워크 다운로드는
+    한 번만 수행되고, 나머지 호출자는 같은 완료를 기다렸다가 결과를 재사용한다.
+    """
+
+    def __init__(self) -> None:
+        self._cv = threading.Condition()
+        self._owner: threading.Thread | None = None
+        self._result: Path | None = None
+        self._error: BaseException | None = None
+        self._active = False
+
+    def run(self, key: str, fn: Callable[[], Path]) -> Path:
+        with self._cv:
+            if self._active:
+                me = threading.current_thread()
+                if self._owner is not me:
+                    # 진행 중 다운로드에 합류: 완료를 기다렸다가 같은 결과 사용.
+                    while self._active:
+                        self._cv.wait(timeout=1.0)
+                    if self._error is not None and self._owner_key == key:
+                        raise self._error
+                    if self._result is not None and self._owner_key == key:
+                        return self._result
+                    # key 불일치/오류: 아래에서 자체 실행 폴백
+                else:
+                    raise RuntimeError("reentrant download")  # 방어용
+            self._active = True
+            self._owner = threading.current_thread()
+            self._owner_key = key
+            self._result = None
+            self._error = None
+        try:
+            result = fn()
+        except BaseException as exc:
+            with self._cv:
+                self._error = exc
+                self._active = False
+                self._owner = None
+                self._cv.notify_all()
+            raise
+        with self._cv:
+            self._result = result
+            self._active = False
+            self._owner = None
+            self._cv.notify_all()
+        return result
+
+_SINGLE_FLIGHT = _SingleFlight()
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+class _FileLock:
+    """디렉터 단위 best-effort 파일 잠금(O_EXCL). 프로세스 충돌 시 stale을 인계받는다."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._held = False
+
+    def __enter__(self) -> "_FileLock":
+        deadline = time.monotonic() + 600.0
+        while True:
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(str(os.getpid()))
+                self._held = True
+                return self
+            except FileExistsError:
+                pass
+            except OSError:
+                return self  # 잠금 불가 환경: 잠금 없이 진행(기존 동작)
+            try:
+                pid = int(self.path.read_text().strip() or 0)
+                stale = pid <= 0 or not _pid_alive(pid)
+            except (OSError, ValueError):
+                stale = time.monotonic() > deadline - 540.0
+            if stale:
+                # 홀더 사망: 잠금 정리 후 재시도(1회).
+                try:
+                    self.path.unlink()
+                except OSError:
+                    pass
+                stale = False
+            if time.monotonic() > deadline:
+                return self  # 포기 대신 잠금 없이 진행
+            time.sleep(0.5)
+
+    def __exit__(self, *exc) -> None:
+        if self._held:
+            try:
+                self.path.unlink()
+            except OSError:
+                pass
+        self._held = False
+
+
 class GgufModelManager:
     """고정 revision GGUF 모델 다운로드/검증. UI 스레드에서 import해도 안전(지연 import)."""
 
@@ -58,6 +165,19 @@ class GgufModelManager:
 
     def is_downloaded(self) -> bool:
         return not self.missing_or_broken()
+
+    def quickly_ready(self) -> bool:
+        """UI용 저비용 준비 확인: 마커+파일 크기만 보고 SHA-256 해시는 생략한다(P18-F2).
+
+        전체 해시 검증은 백그라운드 download()/워커의 model_dir()에서 수행된다.
+        """
+        if not (self.cache_dir / ".complete").is_file():
+            return False
+        for name in (gguf_cfg.GGUF_MAIN_FILE, gguf_cfg.GGUF_MMPROJ_FILE):
+            f = self.cache_dir / name
+            if not f.is_file() or f.stat().st_size == 0:
+                return False
+        return True
 
     def missing_or_broken(self) -> list[str]:
         """완료 마커/파일/해시 문제를 반환. 빈 리스트면 사용 가능."""
@@ -100,19 +220,36 @@ class GgufModelManager:
         problems = self.missing_or_broken()
         if not problems and not force:
             return self.cache_dir
+        # P18-F2: 프로세스 전체 단일 다운로드. 두 번째 호출자는 진행 중 다운로드에 합류한다.
+        return _SINGLE_FLIGHT.run(
+            f"model:{self.cache_dir}",
+            lambda: self._download_locked(progress_cb, force))
+
+    def _download_locked(self, progress_cb=None, force: bool = False) -> Path:
         try:
             from huggingface_hub import hf_hub_download  # 지연 import: UI는 의존하지 않음
         except ImportError as exc:
             from ..core.errors import ModelNotDownloadedError
             raise ModelNotDownloadedError("모델 다운로드 라이브러리를 찾을 수 없습니다.") from exc
         tmp = self.cache_dir.with_name(self.cache_dir.name + ".tmp")
-        if tmp.exists():
-            shutil.rmtree(tmp, ignore_errors=True)
-        tmp.mkdir(parents=True)
+        # P18-F4: 진입 시 tmp를 지우지 않는다. .incomplete/.gguf 조각을 보존해 이어받기.
+        tmp.mkdir(parents=True, exist_ok=True)
+        with _FileLock(tmp / ".lock"):
+            return self._download_inner(tmp, progress_cb)
+
+    def _download_inner(self, tmp: Path, progress_cb=None) -> Path:
         try:
             sizes = self._remote_file_sizes()
             total_bytes = sum(sizes.get(n, 0) for n in (gguf_cfg.GGUF_MAIN_FILE, gguf_cfg.GGUF_MMPROJ_FILE))
             done_bytes = 0
+            # P18-F4: 이어받기 기준점 - 기존 조각 크기를 진행률에 반영한다.
+            for _n in (gguf_cfg.GGUF_MAIN_FILE, gguf_cfg.GGUF_MMPROJ_FILE):
+                inc = tmp / (_n + ".incomplete")
+                fin = tmp / _n
+                if inc.is_file():
+                    done_bytes += inc.stat().st_size
+                elif fin.is_file() and sizes.get(_n, 0) and fin.stat().st_size == sizes[_n]:
+                    done_bytes += fin.stat().st_size
             last_emit = 0.0
 
             def _emit(force: bool = False) -> None:
@@ -133,6 +270,11 @@ class GgufModelManager:
             def _fetch(name: str) -> None:
                 """단일 파일 스트리밍 다운로드(.incomplete 재개 지원). 성공 시 tmp/name 완성."""
                 nonlocal done_bytes
+                fin0 = tmp / name
+                expected0 = sizes.get(name, 0)
+                if fin0.is_file() and expected0 and fin0.stat().st_size == expected0:
+                    done_bytes += 0  # 완전한 크기의 조각 존재: 검증은 _verify_pair가 담당
+                    return
                 from huggingface_hub import hf_hub_url
                 import requests
                 url = hf_hub_url(gguf_cfg.GGUF_MODEL_REPO, filename=name, revision=gguf_cfg.GGUF_MODEL_REVISION)
@@ -167,7 +309,7 @@ class GgufModelManager:
                     raise OfflineError(
                         f"크기 불일치: {name} {actual}/{expected}",
                         user_message="모델 파일 받기가 불완전합니다. 다시 시도해 주세요.")
-                incomplete.rename(tmp / name)
+                os.replace(incomplete, tmp / name)
 
             _emit(force=True)
             for name in (gguf_cfg.GGUF_MAIN_FILE, gguf_cfg.GGUF_MMPROJ_FILE):
@@ -177,6 +319,15 @@ class GgufModelManager:
                 progress_cb({"stage": "verify", "done": 0, "total": 0})
             broken = _verify_pair(tmp)
             if broken:
+                # P18-F4: 손상된 완성 조각은 제거해 다음 시도에서 재수신. incomplete은 보존.
+                for item in broken:
+                    kind, _, rest = item.partition(":")
+                    if kind in ("hash-mismatch", "missing") and rest:
+                        bad = rest.split(":", 1)[0] if kind == "hash-mismatch" else rest
+                        try:
+                            (tmp / bad).unlink(missing_ok=True)
+                        except OSError:
+                            pass
                 raise OfflineError(
                     f"GGUF 모델 파일 검증 실패: {', '.join(broken[:4])}",
                     user_message="모델 파일이 손상되어 받기에 실패했습니다. 다시 시도해 주세요.")
@@ -185,7 +336,11 @@ class GgufModelManager:
             raise
         except Exception as exc:
             _logger.warning("GGUF 모델 다운로드 실패: %s", exc, exc_info=True)
-            shutil.rmtree(tmp, ignore_errors=True)
+            # P18-F4: 부분 다운로드(.incomplete)를 보존해 다음 시도에서 이어받기.
+            try:
+                (tmp / ".complete").unlink(missing_ok=True)
+            except OSError:
+                pass
             if self.is_downloaded():
                 return self.cache_dir  # 기존 정상 캐시 유지
             from ..core.errors import ModelNotDownloadedError

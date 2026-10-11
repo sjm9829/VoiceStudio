@@ -399,9 +399,15 @@ class VoiceEditorDialog(QDialog):
 
     def _model_ready(self) -> bool:
         mm = self.context.model_manager
-        dl = getattr(mm, "is_downloaded", None)
+        # P18-F2: UI 스레드 해시 정지 방지 - 저비용 확인 우선(해시는 워커가 수행).
+        quick = getattr(mm, "quickly_ready", None)
+        if quick is not None:
+            dl_ok = bool(quick())
+        else:
+            dl = getattr(mm, "is_downloaded", None)
+            dl_ok = dl is None or dl()
         eng = getattr(mm, "is_engine_ready", None)
-        return (dl is None or dl()) and (eng is None or eng())
+        return dl_ok and (eng is None or eng())
 
     def _prepare_then_register(self):
         """P18-F2: 등록 전 모델/엔진 자동 준비. 완료 후 등록을 이어서 수행한다.

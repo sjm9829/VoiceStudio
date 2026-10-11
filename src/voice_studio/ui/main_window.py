@@ -648,6 +648,11 @@ class MainWindow(QMainWindow):
         try:
             shutil.copyfile(self._last_output, path)
         except OSError as e:
+            # P18-F4: 실패 시 빈/부분 MP3를 정리한다(O_EXCL로 새로 만든 파일).
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
             QMessageBox.warning(self, "보이스 스튜디오", f"MP3를 저장하지 못했습니다: {e}")
             return
         # P12.3-18: 캐시 job 폴더를 삭제하고 _last_output을 사용자 파일로 교체.
@@ -694,6 +699,10 @@ class MainWindow(QMainWindow):
     def _model_ready(self) -> bool:
         """P18-5: 모델+엔진 준비 여부."""
         mm = self.context.model_manager
+        # P18-F2: UI 스레드에서 수 GB SHA-256 방지 - 저비용 확인 우선.
+        quick = getattr(mm, "quickly_ready", None)
+        if quick is not None:
+            return bool(quick())
         ready = getattr(mm, "is_downloaded", None)
         if ready is not None and not ready():
             return False
@@ -727,15 +736,26 @@ class MainWindow(QMainWindow):
     def _on_model_progress(self, payload: dict):
         stage = payload.get("stage", "")
         done, total = payload.get("done", 0), payload.get("total", 0)
-        label = {"download": "음성 모델", "engine": "음성 엔진"}.get(stage, stage)
+        label = {"download": "음성 모델", "engine": "음성 엔진", "verify": "음성 모델 검증"}.get(stage, stage)
+        if stage == "verify":
+            # P18-F4: 검증 단계는 결정적(busy) 표시 - 가짜 퍼센트 금지.
+            self.progress.setVisible(True)
+            self.progress.setRange(0, 0)
+            self.status_label.setText(f"{label} 중...")
+            return
+        self.progress.setVisible(True)
         if total > 0:
-            pct = int(done * 100 / total)
+            self.progress.setRange(0, 100)
+            pct = min(int(done * 100 / total), 100)
             mb = done / 1e6
             tmb = total / 1e6
             self.status_label.setText(f"{label} 받는 중... {pct}% ({mb:.0f}/{tmb:.0f}MB)")
             if stage == "download":
-                self.progress.setValue(min(pct, 100))
+                self.progress.setValue(pct)
+            else:
+                self.progress.setValue(pct)
         else:
+            self.progress.setRange(0, 0)  # 총량 미지: busy 표시(임의 % 금지)
             self.status_label.setText(f"{label} 받는 중...")
 
     def _on_model_finished(self, ok: bool, err: str):
@@ -746,6 +766,7 @@ class MainWindow(QMainWindow):
         if th is not None and th is not threading.current_thread() and th.is_alive():
             th.join(timeout=2.0)
         self._dl_worker = None
+        self.progress.setVisible(False)
         self.progress.setValue(0)
         self.generate_btn.setEnabled(True)
         if ok:

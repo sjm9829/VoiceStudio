@@ -1,79 +1,77 @@
-"""CUDA/PyTorch/모델 런타임 진단(P12.2-13).
+"""CUDA/런타임 진단(P18 GGUF 계약).
 
-빌드 스크립트(build_windows.bat)가 이 스크립트의 실패(exit != 0)로 빌드를 중단한다.
-검사 항목: torch/torchaudio import/CUDA 사용 가능/GPU 이름·CC/torch CUDA 버전/
-bf16 지원/qwen_tts import/Qwen3TTSModel import/nvidia-smi(P12.3-14).
-목표 GPU는 RTX 2070 SUPER(Turing, CC 7.5)이며 기본 dtype은 float16이다.
+빌드/검증 스크립트가 실패(exit != 0)로 중단할 수 있다.
+검사 항목: nvidia-smi(CUDA driver/GPU 이름), GGUF 런타임 import 가능 여부,
+llama-tts 엔진 실재, 필수 CUDA DLL 존재. PyTorch/qwen_tts 의존은 없다(P18).
 """
+
+from __future__ import annotations
 
 import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
 
-from version_compat import check_torch_torchaudio_compat  # noqa: E402
+REQUIRED_DLL_PREFIXES = ("cudart64", "cublas64", "cublasLt64")
+
+
+def _engine_dir() -> Path | None:
+    try:
+        from voice_studio.core.paths import gguf_engine_dir
+
+        return Path(gguf_engine_dir())
+    except Exception as e:  # noqa: BLE001
+        print(f"[WARN] engine dir 조회 실패: {e}")
+        return None
 
 
 def main() -> int:
     ok = True
     try:
-        import torch  # type: ignore
-    except ImportError as e:
-        print(f"[FAIL] torch import: {e}")
-        return 1
-    print("torch:", torch.__version__)
-    print("torch.version.cuda:", torch.version.cuda)
-    print("torch.cuda.is_available():", torch.cuda.is_available())
-    try:
-        import torchaudio  # type: ignore
-        print("torchaudio:", torchaudio.__version__)
-        compat_ok, compat_msg = check_torch_torchaudio_compat(torch, torchaudio)
-        if compat_ok:
-            print("[OK] torch/torchaudio:", compat_msg)
-        else:
-            print(f"[FAIL] {compat_msg}")
-            ok = False
-    except ImportError as e:
-        print(f"[FAIL] torchaudio import: {e}")
-        return 1
-    if not torch.cuda.is_available():
-        print("[FAIL] CUDA를 사용할 수 없습니다. CUDA wheel과 드라이버를 확인하십시오.")
-        return 1
-    try:
-        name = torch.cuda.get_device_name(0)
-        major, minor = torch.cuda.get_device_capability(0)
-        cc = major * 10 + minor
-        print("device:", name, "cc:", cc)
-        bf16 = torch.cuda.is_bf16_supported()
-        print("bf16 supported:", bf16)
-        # 목표 GPU(RTX 2070 SUPER, cc 75) 정보 출력: FP16 기본 정책과 일치하는지 안내
-        if cc < 70:
-            print(f"[FAIL] CC {cc} < 7.0 (Turing 이상 필요)")
-            ok = False
-        if bf16:
-            print("[INFO] bf16 지원 GPU: dtype 정책이 bfloat16을 선택합니다.")
-        else:
-            print("[INFO] bf16 미지원 GPU(Turing 등): dtype 정책이 float16을 선택합니다.")
-        if "2070 SUPER" in name:
-            print("[INFO] 목표 GPU(RTX 2070 SUPER) 확인: 기본 dtype은 float16.")
-    except Exception as e:
-        print(f"[FAIL] GPU 정보 조회 실패: {e}")
-        ok = False
-    # qwen_tts 실제 import 검증(P12.2-13: 빌드 시점에 worker 의존성 확인)
-    try:
-        from qwen_tts import Qwen3TTSModel  # noqa: F401
-        print("[OK] qwen_tts import 성공")
-    except Exception as e:
-        print(f"[FAIL] qwen_tts import: {e}")
-        ok = False
-    try:
-        r = subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=15)
-        print("nvidia-smi exit:", r.returncode)
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=15)
         if r.returncode != 0:
+            print(f"[FAIL] nvidia-smi exit {r.returncode}: {r.stderr.strip()[:200]}")
             ok = False
+        else:
+            print("[OK] nvidia-smi:", " | ".join(r.stdout.strip().splitlines()[:2]) or "(정보 없음)")
     except FileNotFoundError:
-        print("[WARN] nvidia-smi 없음(드라이버 PATH 확인 필요)")
+        print("[FAIL] nvidia-smi 없음(CUDA driver 미설치?)")
+        ok = False
+    except subprocess.TimeoutExpired:
+        print("[FAIL] nvidia-smi 응답 없음")
+        ok = False
+
+    try:
+        from voice_studio.core import gguf as gguf_cfg
+        from voice_studio.services import gguf_model_manager  # noqa: F401
+
+        print(f"[OK] GGUF 런타임 import (revision {gguf_cfg.GGUF_MODEL_REVISION[:12]}, "
+              f"llama {gguf_cfg.LLAMA_RELEASE_TAG})")
+    except Exception as e:  # noqa: BLE001
+        print(f"[FAIL] GGUF 런타임 import: {e}")
+        return 1
+
+    engine_dir = _engine_dir()
+    exe_name = "llama-tts.exe" if sys.platform == "win32" else "llama-tts"
+    exe = (engine_dir / exe_name) if engine_dir else None
+    if exe is None or not exe.is_file():
+        print(f"[WARN] llama-tts 엔진 미설치(앱에서 자동 다운로드): {exe}")
+    else:
+        print(f"[OK] llama-tts 엔진: {exe}")
+        if sys.platform == "win32":
+            dlls = sorted(engine_dir.glob("*.dll")) if engine_dir else []
+            names = {p.name for p in dlls}
+            missing = [pre for pre in REQUIRED_DLL_PREFIXES
+                       if not any(n.startswith(pre) for n in names)]
+            if missing:
+                print(f"[WARN] CUDA DLL 접두어 누락: {missing} (앱이 엔진 설치 시 채움)")
+            else:
+                print(f"[OK] CUDA DLL {len(dlls)}개 존재")
+
     if not ok:
         print("CHECK_CUDA_FAILED")
         return 1

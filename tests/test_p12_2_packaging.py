@@ -63,6 +63,6 @@ def test_build_script_cuda_tag_parameterized():
 
 def test_check_cuda_validates_cuda_and_qwen_tts():
     src = (Path(__file__).resolve().parents[1] / "scripts" / "check_cuda.py").read_text(encoding="utf-8")
-    assert "is_bf16_supported" in src            # P12.2-13/GPU 정정
-    assert "from qwen_tts import Qwen3TTSModel" in src
+    assert "nvidia-smi" in src                   # P18: CUDA driver 확인(torch 대체)
+    assert "GGUF" in src                        # P18: GGUF 런타임 확인
     assert "CHECK_CUDA_FAILED" in src            # 실패 시 빌드 중단 가능한 exit code

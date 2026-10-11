@@ -1,11 +1,12 @@
-"""GPU/빌드 역할 분리 regression(P12.3 Final Hotfix 후속).
+"""GPU/빌드 역할 분리 regression(P12.3 Final Hotfix 후속, P18 GGUF 계약).
 
 기본 smoke는 GPU 없는 환경에서도 성공해야 하고, --require-gpu에서만 CUDA/GPU가
-mandatory이다. build_windows.bat는 check_cuda.py를 필수 호출하지 않으며, GPU
-validation script는 check_cuda.py와 --require-gpu 스모크를 호출한다.
+mandatory이다. heavy 검사는 GGUF 런타임 계약(llama-tts/CUDA DLL/nvidia-smi)으로
+동작하며 torch/torchaudio/qwen_tts는 더 이상 검사 대상이 아니다.
 """
 
-import sys, types
+import sys
+import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -13,24 +14,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _install_fake_gpu_stack(monkeypatch, cuda_available: bool):
-    """torch/torchaudio/qwen_tts를 가짜 모듈로 대체해 heavy_checks를 구동한다."""
-    fake_torch = types.ModuleType("torch")
-    fake_torch.__version__ = "2.4.0"
-    fake_torch.version = types.SimpleNamespace(cuda="12.6")
-    fake_torch.cuda = types.SimpleNamespace(
-        is_available=lambda: cuda_available,
-        get_device_name=lambda i: "NVIDIA GeForce RTX 2070 SUPER",
-        get_device_capability=lambda i: (7, 5),
-        is_bf16_supported=lambda: False,
-    )
-    fake_audio = types.ModuleType("torchaudio")
-    fake_audio.__version__ = "2.4.0"
-    fake_qwen = types.ModuleType("qwen_tts")
-    fake_qwen.Qwen3TTSModel = type("Qwen3TTSModel", (), {})
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
-    monkeypatch.setitem(sys.modules, "torchaudio", fake_audio)
-    monkeypatch.setitem(sys.modules, "qwen_tts", fake_qwen)
+def _fake_nvidia_smi(monkeypatch, available: bool = True, name: str = "NVIDIA GeForce RTX 2070 SUPER"):
+    """heavy_smoke의 nvidia-smi 조회를 가짜로 대체한다(PyTorch 없이 CUDA 검증)."""
+    from voice_studio import heavy_smoke as hs
+
+    def _run(*args, **kwargs):
+        out = types.SimpleNamespace(
+            returncode=0 if available else 1,
+            stdout=name if available else "",
+            stderr="" if available else "no devices",
+        )
+        return out
+
+    monkeypatch.setattr(hs.shutil, "which", lambda _: "/usr/bin/nvidia-smi" if available else None)
+    monkeypatch.setattr(hs.subprocess, "run", _run)
+
+
+def _fake_engine(monkeypatch, tmp_path: Path, with_dll: bool = True):
+    """gguf_engine_dir를 임시 엔진 디렉터로 대체한다."""
+    from voice_studio.core import paths as paths_mod
+    engine = tmp_path / "engine"
+    engine.mkdir(parents=True, exist_ok=True)
+    (engine / ("llama-tts.exe" if sys.platform == "win32" else "llama-tts")).write_bytes(b"MZ")
+    if with_dll and sys.platform == "win32":
+        (engine / "cudart64_12.dll").write_bytes(b"x")
+    monkeypatch.setattr(paths_mod, "gguf_engine_dir", lambda: engine)
+    return engine
 
 
 def _fake_ffmpeg(monkeypatch):
@@ -58,7 +67,7 @@ def _smoke_log(tmp_path):
 
 
 def test_default_smoke_succeeds_without_gpu(tmp_path, monkeypatch, capsys):
-    _install_fake_gpu_stack(monkeypatch, cuda_available=False)
+    _fake_nvidia_smi(monkeypatch, available=False)
     code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test"])
     assert code == 0
     log = _smoke_log(tmp_path)
@@ -70,15 +79,14 @@ def test_default_smoke_succeeds_without_gpu(tmp_path, monkeypatch, capsys):
     assert ": FAIL" not in out
 
 
-def test_default_smoke_fails_on_torch_import_error(tmp_path, monkeypatch):
-    """frozen에서 torch/qwen import 실패는 기본 smoke에서도 FAIL이다(SKIP 아님)."""
+def test_default_smoke_fails_on_gguf_import_error(tmp_path, monkeypatch):
+    """frozen에서 GGUF 어댑터 import 실패는 기본 smoke에서도 FAIL이다(SKIP 아님)."""
     import sys as _sys
     monkeypatch.setattr(_sys, "frozen", True, raising=False)
     import voice_studio.heavy_smoke as hs
 
     def _failing_heavy(checks, require_gpu=False):
-        checks.append(("Torch import", False, "ImportError: dll not found"))
-        checks.append(("qwen_tts import", False, "ImportError: no module"))
+        checks.append(("GGUF runtime import", False, "ImportError: dll not found"))
         checks.append(("CUDA available", True, "SKIP (...)"))
         checks.append(("GPU", True, "SKIP (...)"))
 
@@ -87,19 +95,65 @@ def test_default_smoke_fails_on_torch_import_error(tmp_path, monkeypatch):
     assert code == 1
     log = _smoke_log(tmp_path)
     assert "SMOKE_FAILED" in log
-    assert "Torch import" in log
+    assert "GGUF runtime import" in log
 
 
-def test_default_frozen_smoke_succeeds_without_gpu(tmp_path, monkeypatch, capsys):
-    """sys.frozen=True + GPU 없음 + 기본 smoke는 SKIP 2개로 성공이어야 한다(P13 후속 회귀).
-
-    기존 test_default_smoke_succeeds_without_gpu는 frozen을 모사하지 않아
-    frozen에서 okflag=False가 FAIL로 분류되는 회귀를 놓쳤다.
-    """
+def test_frozen_smoke_requires_bundled_engine(tmp_path, monkeypatch, capsys):
+    """frozen에서 llama-tts 실행 파일/DLL 누락은 FAIL이어야 한다(설치본 무결성)."""
     import sys as _sys
     monkeypatch.setattr(_sys, "frozen", True, raising=False)
     _fake_ffmpeg(monkeypatch)
-    _install_fake_gpu_stack(monkeypatch, cuda_available=False)
+    _fake_nvidia_smi(monkeypatch, available=False)
+    # 엔진 디렉터 자체를 비워 frozen 무결성 FAIL을 유도한다.
+    engine = tmp_path / "empty-engine"
+    engine.mkdir()
+    from voice_studio.core import paths as paths_mod
+    monkeypatch.setattr("voice_studio.core.paths.gguf_engine_dir", lambda: engine)
+    code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test"])
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "GGUF llama-tts engine: FAIL" in out
+    assert "SMOKE_FAILED" in _smoke_log(tmp_path)
+
+
+def test_frozen_smoke_succeeds_with_engine_and_cuda_dll(tmp_path, monkeypatch, capsys):
+    import sys as _sys
+    if sys.platform != "win32":
+        _fake_engine(monkeypatch, tmp_path)
+    else:
+        _fake_engine(monkeypatch, tmp_path, with_dll=True)
+    _fake_ffmpeg(monkeypatch)
+    _fake_nvidia_smi(monkeypatch, available=False)
+    monkeypatch.setattr(_sys, "frozen", True, raising=False)
+    code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test"])
+    assert code == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "GGUF llama-tts engine: OK" in out
+    assert "CUDA available: SKIP (frozen)" in out
+    assert "SMOKE_OK" in _smoke_log(tmp_path)
+
+
+def test_frozen_smoke_fails_without_cuda_dll_on_windows(tmp_path, monkeypatch, capsys):
+    """Windows frozen에서 llama-tts는 있어도 CUDA DLL이 없으면 FAIL이다."""
+    import sys as _sys
+    if sys.platform != "win32":
+        return  # 비Windows에서는 DLL 검사 자체가 없다(정책: Windows 번들 계약).
+    monkeypatch.setattr(_sys, "frozen", True, raising=False)
+    _fake_engine(monkeypatch, tmp_path, with_dll=False)
+    _fake_ffmpeg(monkeypatch)
+    _fake_nvidia_smi(monkeypatch, available=False)
+    code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test"])
+    assert code == 1
+    assert "CUDA 런타임 DLL 없음" in capsys.readouterr().out
+
+
+def test_frozen_smoke_succeeds_without_gpu(tmp_path, monkeypatch, capsys):
+    """sys.frozen=True + GPU 없음 + 기본 smoke는 SKIP 2개로 성공이어야 한다(P13 후속 회귀)."""
+    import sys as _sys
+    monkeypatch.setattr(_sys, "frozen", True, raising=False)
+    _fake_ffmpeg(monkeypatch)
+    _fake_nvidia_smi(monkeypatch, available=False)
+    _fake_engine(monkeypatch, tmp_path)
     code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test"])
     assert code == 0
     log = _smoke_log(tmp_path)
@@ -115,14 +169,16 @@ def test_frozen_smoke_require_gpu_still_fails_without_gpu(tmp_path, monkeypatch,
     import sys as _sys
     monkeypatch.setattr(_sys, "frozen", True, raising=False)
     _fake_ffmpeg(monkeypatch)
-    _install_fake_gpu_stack(monkeypatch, cuda_available=False)
+    _fake_nvidia_smi(monkeypatch, available=False)
+    if sys.platform == "win32":
+        _fake_engine(monkeypatch, tmp_path)
     code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test", "--require-gpu"])
     assert code == 1
     assert "SMOKE_FAILED" in _smoke_log(tmp_path)
 
 
 def test_require_gpu_fails_when_cuda_unavailable(tmp_path, monkeypatch):
-    _install_fake_gpu_stack(monkeypatch, cuda_available=False)
+    _fake_nvidia_smi(monkeypatch, available=False)
     code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test", "--require-gpu"])
     assert code == 1
     log = _smoke_log(tmp_path)
@@ -131,8 +187,9 @@ def test_require_gpu_fails_when_cuda_unavailable(tmp_path, monkeypatch):
 
 
 def test_require_gpu_succeeds_when_cuda_available(tmp_path, monkeypatch):
-    _install_fake_gpu_stack(monkeypatch, cuda_available=True)
+    _fake_nvidia_smi(monkeypatch, available=True)
     _fake_ffmpeg(monkeypatch)
+    _fake_engine(monkeypatch, tmp_path)
     code = _run_smoke(monkeypatch, tmp_path, ["VoiceStudio.exe", "--smoke-test", "--require-gpu"])
     assert code == 0
     assert "SMOKE_OK" in _smoke_log(tmp_path)
