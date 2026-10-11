@@ -20,6 +20,8 @@ from ..core.errors import OfflineError
 from ..core.paths import gguf_models_dir, gguf_engine_dir
 
 _logger = logging.getLogger(__name__)
+# 모든 manager 인스턴스에서 동일한 모델/엔진 staging 경로를 공유하므로 직렬화한다.
+_PREPARE_LOCK = threading.RLock()
 
 
 def _sha256(path: Path, chunk: int = 1 << 20) -> str:
@@ -92,6 +94,11 @@ class GgufModelManager:
 
     def download(self, progress_cb: Callable[[dict], None] | None = None,
                  force: bool = False) -> Path:
+        with _PREPARE_LOCK:
+            return self._download_locked(progress_cb=progress_cb, force=force)
+
+    def _download_locked(self, progress_cb: Callable[[dict], None] | None = None,
+                         force: bool = False) -> Path:
         """고정 revision에서 두 파일을 내려받는다. 실패 시 정상 캐시를 훼손하지 않는다.
 
         성공 검증 전까지는 .tmp에서만 작업하고, 해시 재검증 통과 시에만
@@ -106,9 +113,9 @@ class GgufModelManager:
             from ..core.errors import ModelNotDownloadedError
             raise ModelNotDownloadedError("모델 다운로드 라이브러리를 찾을 수 없습니다.") from exc
         tmp = self.cache_dir.with_name(self.cache_dir.name + ".tmp")
-        if tmp.exists():
+        if force and tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
-        tmp.mkdir(parents=True)
+        tmp.mkdir(parents=True, exist_ok=True)
         try:
             sizes = self._remote_file_sizes()
             total_bytes = sum(sizes.get(n, 0) for n in (gguf_cfg.GGUF_MAIN_FILE, gguf_cfg.GGUF_MMPROJ_FILE))
@@ -137,6 +144,15 @@ class GgufModelManager:
                 import requests
                 url = hf_hub_url(gguf_cfg.GGUF_MODEL_REPO, filename=name, revision=gguf_cfg.GGUF_MODEL_REVISION)
                 incomplete = tmp / (name + ".incomplete")
+                completed_file = tmp / name
+                if completed_file.is_file():
+                    expected_digest = (gguf_cfg.GGUF_MAIN_SHA256 if name == gguf_cfg.GGUF_MAIN_FILE
+                                       else gguf_cfg.GGUF_MMPROJ_SHA256)
+                    if _sha256(completed_file) == expected_digest:
+                        done_bytes += completed_file.stat().st_size
+                        _emit(force=True)
+                        return
+                    completed_file.unlink()
                 headers: dict = {}
                 resume = incomplete.stat().st_size if incomplete.exists() else 0
                 if resume > 0:
@@ -150,6 +166,11 @@ class GgufModelManager:
                     if resume > 0 and r.status_code == 200:  # Range 무시 응답: 처음부터
                         resume = 0
                     partial = resume > 0 and r.status_code == 206
+                    if partial:
+                        range_header = r.headers.get("Content-Range", "")
+                        if not range_header.startswith(f"bytes {resume}-"):
+                            raise OfflineError("HTTP range response does not match requested resume offset",
+                                               user_message="모델 이어받기 응답이 올바르지 않습니다. 다시 시도해 주세요.")
                     if not partial:
                         resume = 0
                     else:
@@ -185,7 +206,7 @@ class GgufModelManager:
             raise
         except Exception as exc:
             _logger.warning("GGUF 모델 다운로드 실패: %s", exc, exc_info=True)
-            shutil.rmtree(tmp, ignore_errors=True)
+            # 네트워크 중단 시 .incomplete 파일을 보존해 다음 시도에 이어받는다.
             if self.is_downloaded():
                 return self.cache_dir  # 기존 정상 캐시 유지
             from ..core.errors import ModelNotDownloadedError
@@ -213,6 +234,10 @@ class GgufModelManager:
         return self.engine_binary().is_file() and (self.engine_dir() / ".complete").is_file()
 
     def download_engine(self, progress_cb=None, force: bool = False) -> Path:
+        with _PREPARE_LOCK:
+            return self._download_engine_locked(progress_cb=progress_cb, force=force)
+
+    def _download_engine_locked(self, progress_cb=None, force: bool = False) -> Path:
         """llama.cpp 고정 release b11540의 Windows CUDA zip 2종을 받아 풀어 검증한다.
 
         성공 조건: engine_dir/llama-tts(.exe) 존재. 실패 시 기존 engine dir을 훼손하지 않는다.
