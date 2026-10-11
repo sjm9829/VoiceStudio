@@ -92,8 +92,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_voices()
         self._refresh_save_location_label()
-        if not self._model_ready():  # P18-F2: 준비 안 됐을 때만 백그라운드 확인/다운로드
-            self._startup_model_check()
+        self._startup_model_check()  # 모델 해시 검사는 항상 백그라운드에서 수행
 
     def _build_ui(self):
         central = QWidget(); self.setCentralWidget(central)
@@ -391,9 +390,8 @@ class MainWindow(QMainWindow):
         if not script:
             QMessageBox.information(self, "보이스 스튜디오", "대본을 입력해 주세요.")
             return
-        if not self._model_ready():
-            self._ensure_model_async(lambda ok: self._continue_generation(profile_uuid, script) if ok else None)
-            return
+        self._ensure_model_async(lambda ok: self._continue_generation(profile_uuid, script) if ok else None)
+        return
         try:
             if not self._start_worker(self._build_job(profile_uuid, script)):
                 return  # 다른 worker 실행 중(P12.3-25)
@@ -648,6 +646,10 @@ class MainWindow(QMainWindow):
         try:
             shutil.copyfile(self._last_output, path)
         except OSError as e:
+            try:
+                path.unlink(missing_ok=True)  # 독점 생성한 빈/부분 파일 정리
+            except OSError:
+                pass
             QMessageBox.warning(self, "보이스 스튜디오", f"MP3를 저장하지 못했습니다: {e}")
             return
         # P12.3-18: 캐시 job 폴더를 삭제하고 _last_output을 사용자 파일로 교체.
@@ -680,7 +682,7 @@ class MainWindow(QMainWindow):
             except FileExistsError:
                 return None
             except OSError:
-                return path  # excl 미지원 등: 존재 확인 기반 폴백
+                return None  # 안전한 독점 생성 실패: 기존 파일 덮어쓰기 금지
             os.close(fd)
             return path
 
@@ -708,6 +710,9 @@ class MainWindow(QMainWindow):
             self._dl_callbacks.append(done)
             return
         self.generate_btn.setEnabled(False)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setVisible(True)
         self.status_label.setText("음성 모델을 준비하는 중...")
         mm = self.context.model_manager
         try:  # P18-F2: 다운로더 모듈을 UI 스레드에서 미리 적재(백그라운드 import 경합 방지)
@@ -726,6 +731,11 @@ class MainWindow(QMainWindow):
 
     def _on_model_progress(self, payload: dict):
         stage = payload.get("stage", "")
+        if stage == "verify":
+            self.status_label.setText("모델 파일 무결성 확인 중...")
+            self.progress.setVisible(False)
+            return
+        self.progress.setVisible(stage == "download" and bool(payload.get("total", 0)))
         done, total = payload.get("done", 0), payload.get("total", 0)
         label = {"download": "음성 모델", "engine": "음성 엔진"}.get(stage, stage)
         if total > 0:
@@ -747,6 +757,7 @@ class MainWindow(QMainWindow):
             th.join(timeout=2.0)
         self._dl_worker = None
         self.progress.setValue(0)
+        self.progress.setVisible(False)
         self.generate_btn.setEnabled(True)
         if ok:
             self._clear_model_retry()
