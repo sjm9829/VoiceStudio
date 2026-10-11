@@ -386,10 +386,9 @@ class VoiceEditorDialog(QDialog):
                                         "오디오 파일을 분석하는 중입니다. 완료 후 다시 시도해 주세요.")
                 return
             self._validate_register_inputs()
-            if self._model_ready():
-                self._start_register_worker()
-            else:
-                self._prepare_then_register()
+            # 다운로드/대용량 SHA 검사 모두 UI 외부에서 수행한다.
+            # 등록 창이 열리는 동안 앱 시작 다운로드가 진행 중일 수 있다.
+            self._prepare_then_register()
         except VoiceStudioError as exc:
             # 모델 미다운로드 등 사용자 안내가 필요한 오류(P12.1-06/07)
             QMessageBox.warning(self, "보이스 스튜디오", exc.user_message)
@@ -410,6 +409,9 @@ class VoiceEditorDialog(QDialog):
         상태 라벨로 표시한다. 실패 시 안내 후 재시도할 수 있다.
         """
         from .main_window import ModelPrepareWorker
+        if getattr(self, "_prepare_thread", None) is not None:
+            return  # 같은 등록 창에서 다운로드 중복 시작 방지
+        self.save_btn.setEnabled(False)
         self._prepare_thread = QThread(self)
         self._prepare_worker = ModelPrepareWorker(self.context.model_manager)
         self._prepare_worker.moveToThread(self._prepare_thread)
@@ -430,6 +432,7 @@ class VoiceEditorDialog(QDialog):
     def _on_prepare_finished(self, ok: bool, err: str):
         thread, self._prepare_thread = getattr(self, "_prepare_thread", None), None
         self._prepare_worker = None
+        self.save_btn.setEnabled(True)
         if thread is not None:
             thread.quit()
             thread.wait(2000)
@@ -575,7 +578,7 @@ class VoiceEditorDialog(QDialog):
         가장 단순하고 안전한 정책인 close 차단을 사용한다.
         등록 worker(QProcess) 실행 중에는 기존대로 terminate 요청 후 진행한다.
         """
-        for name in ("_loader", "_transcribe_thread", "_preview_thread"):
+        for name in ("_loader", "_transcribe_thread", "_preview_thread", "_prepare_thread"):
             thread = getattr(self, name, None)
             if thread is not None and thread.isRunning():
                 QMessageBox.information(
@@ -587,11 +590,6 @@ class VoiceEditorDialog(QDialog):
         # 등록 worker 실행 중이 아니면 coordinator를 건드리지 않고, 실행 중이면
         # worker 종료를 요청한다. slot 반납은 _on_register_finished에서 수행하므로
         # 다른 화면이 점유한 narrate slot을 여기서 풀 수 없다.
-        thread = getattr(self, "_prepare_thread", None)
-        if thread is not None:
-            thread.quit()
-            thread.wait(2000)
-            self._prepare_thread = None
         if self._worker is not None:
             terminate = getattr(self._worker, "terminate", None)
             if callable(terminate):
